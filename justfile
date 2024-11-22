@@ -203,15 +203,6 @@ enable-autostart:
         echo "Stored device selection in .env file"
     fi
     
-    # Create startup script
-    mkdir -p ${CURRENT_PATH}/scripts
-    tee ${CURRENT_PATH}/scripts/start.sh > /dev/null << EOL
-        #!/bin/bash
-        exec ${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
-    EOL
-    
-    chmod +x ${CURRENT_PATH}/scripts/start.sh
-    
     # Create user systemd directory
     mkdir -p ~/.config/systemd/user
     
@@ -229,7 +220,7 @@ enable-autostart:
     Environment=DISPLAY=:0
     Environment=SDL_VIDEODRIVER=x11
 
-    ExecStart=${CURRENT_PATH}/scripts/start.sh
+    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
 
     Restart=always
     RestartSec=10
