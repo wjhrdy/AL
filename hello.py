@@ -551,6 +551,8 @@ class MusicIdentifier:
             # If no song is playing or we're showing the schedule, show schedule information
             if self.schedule_showing or (not self.last_identified):
                 message = self._get_schedule_message()
+                if not self._is_within_operating_hours():
+                    message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
                 lines = message.split('\n')
                 
                 # Calculate dynamic font sizes based on screen height - adjusted for screen width
@@ -939,6 +941,9 @@ class MusicIdentifier:
                 await asyncio.sleep(0.1)  # Prevent CPU overload
                 
                 if not self._is_within_operating_hours():
+                    self.handle_events()
+                    self.draw_window()
+                    pygame.display.flip()
                     await asyncio.sleep(1)  # Longer sleep when inactive
                     continue
 
