@@ -1,6 +1,6 @@
 import pyaudio
 import numpy as np
-from shazamio import Shazam, Serialize
+from shazamio import Shazam
 import asyncio
 import pygame
 import requests
@@ -759,15 +759,19 @@ class MusicIdentifier:
                 channels=self.CHANNELS
             )
             
-            # Explicitly clean up memory
-            del audio_array
-            del audio_int16
+            # Store audio segment in debug mode
+            if self.debug_mode:
+                self.last_audio_segment = audio_segment
             
             # Export to WAV format in memory
             buffer = audio_segment.export(format="wav")
             audio_bytes = buffer.read()
             buffer.close()  # Explicitly close the buffer
 
+            # Clean up memory
+            del audio_array
+            del audio_int16
+            
             # Run song recognition
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -822,7 +826,7 @@ class MusicIdentifier:
                 try:
                     data = stream.read(self.CHUNK, exception_on_overflow=False)
                     self.frames.append(data)
-                    await asyncio.sleep(0.001)  # Use asyncio.sleep instead of time.sleep
+                    time.sleep(0.001)  # Use time.sleep since this runs in a regular thread
                 except Exception as e:
                     self.logger.error(f"Error recording audio: {e}")
                     break
@@ -833,6 +837,17 @@ class MusicIdentifier:
                     stream.close()
                 except Exception as e:
                     self.logger.error(f"Error closing audio stream: {e}")
+        
+        # Start processing in a new thread if we have frames
+        if self.frames:
+            self.processing_thread = threading.Thread(
+                target=self.process_audio_and_recognize,
+                args=(self.frames.copy(),)  # Pass a copy of the frames
+            )
+            self.processing_thread.start()
+            self.frames = []  # Clear frames after starting processing
+        
+        self.recording = False  # Reset recording state
 
     async def check_recognition_result(self):
         """Check for song recognition results."""
@@ -899,111 +914,67 @@ class MusicIdentifier:
             self.font = pygame.font.Font(None, 36)
 
             last_record_time = 0
-            last_gc_time = time.time()  # Add garbage collection timing
+            last_gc_time = time.time()
             
-            try:
-                while True:
-                    # Force garbage collection periodically
-                    current_time = time.time()
-                    if current_time - last_gc_time > 60:  # Every minute
-                        import gc
-                        gc.collect()
-                        last_gc_time = current_time
-                    
-                    await asyncio.sleep(0.1)  # Prevent CPU overload
-                    
-                    if not self._is_within_operating_hours():
-                        await asyncio.sleep(1)  # Longer sleep when inactive
-                        continue
+            while True:
+                # Force garbage collection periodically
+                current_time = time.time()
+                if current_time - last_gc_time > 60:  # Every minute
+                    import gc
+                    gc.collect()
+                    last_gc_time = current_time
+                
+                await asyncio.sleep(0.1)  # Prevent CPU overload
+                
+                if not self._is_within_operating_hours():
+                    await asyncio.sleep(1)  # Longer sleep when inactive
+                    continue
 
-                    self.handle_events()
-                    
-                    current_time = time.time()
-                    if self._is_within_operating_hours():
-                        # Check if we should start a new recording
-                        if not self.recording and not self.processing_thread and current_time - last_record_time >= self.RECORD_SECONDS:
-                            await self.start_recording()
-                            last_record_time = current_time
-                        
-                        await self.check_recognition_result()
-                        self.draw_window()
-                    else:
-                        # If outside operating hours, clear the screen and show the custom message
-                        if pygame.display.get_init():
-                            with self.config_lock:
-                                off_hours_message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-                            
-                            # Get custom message from config, or use default if not found
-                            self.screen.fill((0, 0, 0))
-                            # Create larger font for the message
-                            large_font = pygame.font.Font(None, 96)  # Increased from 36 to 96
-                            
-                            # Wrap the message if it's too long
-                            words = off_hours_message.split()
-                            lines = []
-                            current_line = []
-                            
-                            for word in words:
-                                current_line.append(word)
-                                test_line = ' '.join(current_line)
-                                if large_font.size(test_line)[0] > self.screen_width * 0.8:
-                                    if len(current_line) > 1:
-                                        lines.append(' '.join(current_line[:-1]))
-                                        current_line = [word]
-                                    else:
-                                        lines.append(test_line)
-                                        current_line = []
-                            
-                            if current_line:
-                                lines.append(' '.join(current_line))
-                            
-                            # Calculate total height of all lines
-                            line_height = large_font.get_linesize()
-                            total_height = line_height * len(lines)
-                            start_y = (self.screen_height - total_height) // 2
-                            
-                            # Render each line
-                            for i, line in enumerate(lines):
-                                text_surface = self.render_text_with_outline(
-                                    line,
-                                    large_font,
-                                    (255, 255, 255),  # White text
-                                    (0, 0, 0),        # Black outline
-                                    4                  # Thicker outline for larger text
-                                )
-                                text_rect = text_surface.get_rect(center=(self.screen_width // 2, start_y + i * line_height))
-                                self.screen.blit(text_surface, text_rect)
-                            
-                            pygame.display.flip()
-                        
-                        # Sleep to avoid busy waiting
-                        await asyncio.sleep(1)
-                    
-                    # Draw any active notifications
-                    self.draw_notification()
-                    pygame.display.flip()
-                    
-                    # Small delay to prevent high CPU usage
-                    await asyncio.sleep(0.1)
-                    
-            except KeyboardInterrupt:
-                self.logger.info("Shutting down...")
-                if hasattr(self, 'p') and self.p:
-                    self.p.terminate()
-                if hasattr(self, 'stream') and self.stream:
-                    self.stream.stop_stream()
-                    self.stream.close()
-                if hasattr(self, 'config_update_task') and self.config_update_task:
-                    self.config_update_task.cancel()
-                pygame.quit()
-                sys.exit(0)
-        
+                self.handle_events()
+                
+                # Start new recording if needed
+                if not self.recording and not self.processing_thread:
+                    if current_time - last_record_time >= self.RECORD_SECONDS:
+                        await self.start_recording()
+                        last_record_time = current_time
+                
+                # Check if recording is complete
+                if self.recording and self.recording_thread and not self.recording_thread.is_alive():
+                    self.recording = False
+                    if self.frames:  # Only process if we have audio data
+                        self.processing_thread = threading.Thread(
+                            target=self.process_audio_and_recognize,
+                            args=(self.frames.copy(),)  # Pass a copy of the frames
+                        )
+                        self.processing_thread.start()
+                        self.frames = []  # Clear frames after starting processing
+                
+                await self.check_recognition_result()
+                self.draw_window()
+                
+                # Draw any active notifications
+                self.draw_notification()
+                pygame.display.flip()
+                
+                # Small delay to prevent high CPU usage
+                await asyncio.sleep(0.1)
+                
+        except KeyboardInterrupt:
+            self.logger.info("Received keyboard interrupt, shutting down...")
+            # Clean up resources
+            if hasattr(self, 'p') and self.p:
+                self.p.terminate()
+            if hasattr(self, 'stream') and self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+            if hasattr(self, 'config_update_task') and self.config_update_task:
+                self.config_update_task.cancel()
+            raise  # Re-raise to allow main() to handle final cleanup
         except Exception as e:
             self.logger.error(f"Error in main loop: {e}")
             if self.debug_mode:
                 import traceback
                 self.logger.debug(f"Full traceback: {traceback.format_exc()}")
-        
         finally:
             pygame.quit()
 
@@ -1076,5 +1047,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nExiting...")
-        sys.exit(0)
+        print("\nShutting down gracefully...")
+    finally:
+        # Ensure pygame is quit even if other cleanup fails
+        pygame.quit()
+        print("Cleanup complete")
