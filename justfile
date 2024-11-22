@@ -27,7 +27,12 @@ clean:
 
 # Install system dependencies for macOS
 setup-mac:
-    brew install portaudio
+    if ! command -v brew &> /dev/null; then
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    fi
+    if ! brew list --versions portaudio &> /dev/null; then
+        brew install portaudio
+    fi
 
 # Install system dependencies for Raspberry Pi
 setup-pi:

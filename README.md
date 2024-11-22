@@ -15,15 +15,10 @@ A real-time music recognition application optimized for CRT displays, featuring 
   - Smooth fade transitions
   - Auto-scrolling for long song titles
 
-## Requirements
+## Pre-requisites
 
-- Python 3.x
-- PyAudio
-- NumPy
-- PyDub
-- Pygame
-- Requests
-- ShazamIO
+- **[Python 3.10+](https://www.python.org/)**
+- **[Just](https://just.systems/)**
 
 ## Installation
 
@@ -48,19 +43,19 @@ A real-time music recognition application optimized for CRT displays, featuring 
 ## Usage
 
 1. Run the application:
-```bash
-just run
-```
+    ```bash
+    just run
+    ```
 
-For debugging:
-```bash
-just debug
-```
+    For debugging:
+    ```bash
+    just debug
+    ```
 
 2. Controls:
-- Press 'f' to toggle fullscreen mode
-- Press 's' to toggle stretch mode (for 4:3 CRT displays)
-- Press 'q' to quit the application
+    - Press 'f' to toggle fullscreen mode
+    - Press 's' to toggle stretch mode (for 4:3 CRT displays)
+    - Press 'q' to quit the application
 
 ## Display Modes
 
