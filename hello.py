@@ -12,6 +12,10 @@ import logging
 from pydub import AudioSegment
 import threading
 from queue import Queue, Empty
+import yaml
+from datetime import datetime, time as dt_time
+import os
+import aiohttp
 
 # Suppress urllib3 warnings
 warnings.filterwarnings('ignore', category=Warning)
@@ -30,6 +34,18 @@ class MusicIdentifier:
         )
         self.logger = logging.getLogger(__name__)
         self.logger.debug("Initializing MusicIdentifier in debug mode" if debug_mode else "Initializing MusicIdentifier")
+        
+        # Load config
+        self.config = self._load_config()
+        self.config_lock = threading.Lock()
+        self.last_config_update = time.time()
+        
+        # Start config update task if enabled
+        if self.config.get('remote', {}).get('enabled', False):
+            self.config_update_task = asyncio.create_task(self._update_config_loop())
+            self.logger.debug("Config update loop started")
+        else:
+            self.config_update_task = None
         
         # Create debug output directory
         if debug_mode:
@@ -89,8 +105,11 @@ class MusicIdentifier:
         self.p = pyaudio.PyAudio()
         self.input_device_index = self._find_input_device()
         
-        self.logger.debug("Initialization complete")
-    
+        # Schedule display timing
+        self.last_schedule_display = 0
+        self.schedule_showing = False
+        self.schedule_show_start = 0
+
     def _find_input_device(self):
         """Find and return the selected input device index"""
         devices = []
@@ -178,7 +197,8 @@ class MusicIdentifier:
             except KeyboardInterrupt:
                 print("\nExiting...")
                 sys.exit(0)
-    
+
+    @staticmethod
     def list_devices():
         """List all available input devices without starting the program"""
         p = pyaudio.PyAudio()
@@ -209,6 +229,132 @@ class MusicIdentifier:
             print("\nNo default input device found")
         
         p.terminate()
+
+    def _load_config(self):
+        """Load the configuration from YAML file."""
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(config_dir, 'config.yaml')
+        sample_config_path = os.path.join(config_dir, 'config.sample.yaml')
+
+        # If config.yaml doesn't exist but sample exists, create from sample
+        if not os.path.exists(config_path) and os.path.exists(sample_config_path):
+            self.logger.info("Creating config.yaml from sample...")
+            try:
+                import shutil
+                shutil.copy2(sample_config_path, config_path)
+                self.logger.info("Created config.yaml from sample")
+            except Exception as e:
+                self.logger.error(f"Error creating config from sample: {e}")
+                return {'schedule': [], 'display': {'off_hours_message': 'Outside operating hours'}}
+
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except FileNotFoundError:
+            self.logger.warning(f"Config file not found at {config_path}")
+            return {'schedule': [], 'display': {'off_hours_message': 'Outside operating hours'}}
+        except yaml.YAMLError as e:
+            self.logger.error(f"Error parsing config file: {e}")
+            return {'schedule': [], 'display': {'off_hours_message': 'Outside operating hours'}}
+
+    def _save_config(self, config):
+        """Save configuration to file."""
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
+        try:
+            with open(config_path, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+            self.logger.debug("Config file updated successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error saving config: {e}")
+            return False
+
+    def _is_within_operating_hours(self):
+        """Check if current time is within operating hours."""
+        if not self.config or 'schedule' not in self.config:
+            return True  # If no schedule is found, operate 24/7
+            
+        current_time = datetime.now()
+        current_day = current_time.strftime("%A")
+        
+        # Find schedule for current day
+        day_schedule = None
+        for schedule_item in self.config['schedule']:
+            if schedule_item['day'] == current_day:
+                day_schedule = schedule_item
+                break
+        
+        if not day_schedule:
+            self.logger.debug(f"No schedule found for {current_day}, staying inactive")
+            return False
+            
+        # Parse opening and closing times
+        try:
+            open_time = datetime.strptime(day_schedule['open'], "%I:%M %p").time()
+            close_time = datetime.strptime(day_schedule['close'], "%I:%M %p").time()
+            current_time = current_time.time()
+            
+            # Check if current time is within operating hours
+            return open_time <= current_time <= close_time
+        except ValueError as e:
+            self.logger.error(f"Error parsing schedule times: {e}")
+            return False
+
+    def _get_schedule_message(self):
+        """Get a formatted message about the schedule and current status."""
+        if not self.config or 'schedule' not in self.config:
+            return "AL is running 24/7"
+
+        # Get display settings with defaults
+        display_config = self.config.get('display', {})
+        header = display_config.get('schedule_header', 'Operating Hours')
+        time_format = display_config.get('schedule_time_format', '{open} - {close}')
+        
+        # Format all scheduled days
+        schedule_text = f"{header}:\n"
+        
+        # Group days with same hours
+        hours_to_days = {}
+        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        day_indices = {day: i for i, day in enumerate(day_order)}
+        
+        for item in self.config['schedule']:
+            hours = time_format.format(open=item['open'], close=item['close'])
+            if hours not in hours_to_days:
+                hours_to_days[hours] = []
+            hours_to_days[hours].append(item['day'])
+        
+        # Process each group of hours
+        for hours, days in hours_to_days.items():
+            # Sort days according to day_order
+            days.sort(key=lambda x: day_indices[x])
+            
+            # Find consecutive day ranges
+            ranges = []
+            range_start = days[0]
+            prev_idx = day_indices[days[0]]
+            
+            for day in days[1:]:
+                curr_idx = day_indices[day]
+                if curr_idx != prev_idx + 1:
+                    # End of a range
+                    if range_start == days[days.index(day)-1]:
+                        ranges.append(range_start)
+                    else:
+                        ranges.append(f"{range_start}-{days[days.index(day)-1]}")
+                    range_start = day
+                prev_idx = curr_idx
+            
+            # Add the last range
+            if range_start == days[-1]:
+                ranges.append(range_start)
+            else:
+                ranges.append(f"{range_start}-{days[-1]}")
+            
+            # Add to schedule text with days and hours on separate lines
+            schedule_text += f"{', '.join(ranges)}\n{hours}\n"
+
+        return schedule_text
 
     def render_text_with_outline(self, text, font, color, outline_color=(0, 0, 0), outline_width=2):
         """Render text with an outline for better visibility."""
@@ -242,11 +388,12 @@ class MusicIdentifier:
         text_width = text_surface.get_width()
         
         if text_width <= max_width:
-            # If text fits, center it precisely using float division and rounding
-            x_pos = round((max_width - text_width) / 2)
-            # Create a temporary surface to handle alpha
+            # If text fits, center it precisely
+            x_pos = (self.screen_width - text_width) // 2  # Center relative to screen width, not max_width
+            # Create a temporary surface with alpha support
             temp_surface = pygame.Surface((text_width, text_surface.get_height()), pygame.SRCALPHA)
             temp_surface.blit(text_surface, (0, 0))
+            # Apply alpha
             temp_surface.set_alpha(int(alpha * 255))
             self.screen.blit(temp_surface, (x_pos, y_pos))
         else:
@@ -287,8 +434,23 @@ class MusicIdentifier:
         # Clear the window
         self.screen.fill((0, 0, 0))  # Black background
 
-        # Draw the current background if it exists
-        if self.current_background is not None:
+        # Get schedule display settings
+        schedule_interval = self.config.get('display', {}).get('schedule_interval', 60)  # Default 60 seconds
+        schedule_duration = self.config.get('display', {}).get('schedule_duration', 10)  # Default 10 seconds
+        current_time = time.time()
+
+        # Check if it's time to show the schedule
+        if not self.schedule_showing and current_time - self.last_schedule_display >= schedule_interval:
+            self.schedule_showing = True
+            self.schedule_show_start = current_time
+            self.last_schedule_display = current_time
+
+        # Check if we should stop showing the schedule
+        if self.schedule_showing and current_time - self.schedule_show_start >= schedule_duration:
+            self.schedule_showing = False
+
+        # Draw the current background if it exists and we're not showing the schedule
+        if self.current_background is not None and not self.schedule_showing:
             # Get the current display size
             display_width, display_height = pygame.display.get_surface().get_size()
             
@@ -297,7 +459,8 @@ class MusicIdentifier:
             img_height = self.current_background.get_height()
             
             # Calculate the scale to fit the image while maintaining aspect ratio
-            scale = min(display_width / img_width, display_height / img_height)
+            scale = min(display_width / img_width, 
+                      display_height / img_height)
             
             # Calculate the base dimensions that maintain the aspect ratio
             base_width = int(img_width * scale)
@@ -322,8 +485,8 @@ class MusicIdentifier:
             y_pos = (display_height - target_height) // 2
             self.screen.blit(scaled_surface, (x_pos, y_pos))
 
-        # Draw song info if available and calculate alpha based on time
-        if self.last_identified and self.last_song_time:
+        # Draw song info if available and we're not showing the schedule
+        if self.last_identified and self.last_song_time and not self.schedule_showing:
             current_time = time.time()
             elapsed_time = current_time - self.last_song_time
             
@@ -358,18 +521,6 @@ class MusicIdentifier:
                     2                  # Slightly smaller outline for artist
                 )
                 
-                # Create transparent surfaces for fade effect
-                title_alpha = pygame.Surface(title_surface.get_size(), pygame.SRCALPHA)
-                artist_alpha = pygame.Surface(artist_surface.get_size(), pygame.SRCALPHA)
-                
-                # Fill with transparent color
-                title_alpha.fill((255, 255, 255, alpha))
-                artist_alpha.fill((255, 255, 255, alpha))
-                
-                # Blit using alpha as a mask
-                title_surface.blit(title_alpha, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-                artist_surface.blit(artist_alpha, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-                
                 # Calculate maximum width for text (80% of screen width)
                 max_width = int(self.screen_width * 0.8)
                 
@@ -384,7 +535,54 @@ class MusicIdentifier:
                 # Draw artist name (centered, no scroll needed for artist)
                 artist_rect = artist_surface.get_rect(center=(self.screen_width // 2, self.screen_height // 2 + 40))
                 self.screen.blit(artist_surface, artist_rect)
+        else:
+            # If no song is playing or we're showing the schedule, show schedule information
+            if self.schedule_showing or (not self.last_identified):
+                message = self._get_schedule_message()
+                lines = message.split('\n')
+                
+                # Calculate dynamic font sizes based on screen height - adjusted for screen width
+                header_font_size = min(int(self.screen_height * 0.13), 100)  # Slightly smaller header
+                schedule_font_size = min(int(self.screen_height * 0.09), 72)  # Adjusted for width
+                
+                # Calculate dynamic spacing - adjusted for larger text
+                group_spacing = int(self.screen_height * 0.15)  # Spacing between day groups
+                hour_spacing = int(self.screen_height * 0.08)   # Tighter spacing for hours
+                header_spacing = int(self.screen_height * 0.18)  # Larger spacing after header
+                
+                # Calculate starting Y position (20% from top to accommodate larger text)
+                start_y = int(self.screen_height * 0.2)
+                
+                # Render each line
+                current_y = start_y
+                for i, line in enumerate(lines):
+                    if line.strip():  # Only render non-empty lines
+                        if i == 0:  # Header line
+                            font = pygame.font.Font(None, header_font_size)
+                            text_surface = self.render_text_with_outline(
+                                line, font, (255, 255, 255), (0, 0, 0), 4)  # Thicker outline
+                            current_y = start_y
+                        else:  # Schedule lines
+                            font = pygame.font.Font(None, schedule_font_size)
+                            text_surface = self.render_text_with_outline(
+                                line.strip(), font, (255, 255, 255), (0, 0, 0), 3)  # Thicker outline
+                            
+                            if i == 1:  # First line after header
+                                current_y += header_spacing
+                            # Use tighter spacing for hours (every even line after header)
+                            elif i % 2 == 0:
+                                current_y += hour_spacing
+                            else:
+                                # Add full group spacing before each day group
+                                current_y += group_spacing
+                            
+                        # Center the text horizontally
+                        text_rect = text_surface.get_rect(centerx=self.screen_width//2, centery=current_y)
+                        self.screen.blit(text_surface, text_rect)
 
+        # Draw notification on top if active
+        self.draw_notification()
+        
         pygame.display.flip()
 
     def display_album_art(self, track):
@@ -426,6 +624,125 @@ class MusicIdentifier:
             if self.debug_mode:
                 self.logger.debug(f"Track data: {track}")
             return False
+
+    async def _fetch_remote_config(self):
+        """Fetch remote config from GitHub Gist."""
+        remote_config = self.config.get('remote', {})
+        if not remote_config.get('enabled') or not remote_config.get('url'):
+            self.logger.debug("Remote config disabled or URL not set")
+            return None
+
+        try:
+            base_url = remote_config['url'].rstrip('/')
+            # Convert GitHub Gist URL to raw URL
+            if 'gist.github.com' in base_url:
+                # Extract the Gist ID and construct raw URL
+                gist_id = base_url.split('/')[-1]
+                url = f"https://gist.githubusercontent.com/wjhrdy/{gist_id}/raw"
+            else:
+                url = base_url + '/raw'
+                
+            self.logger.debug(f"Fetching remote config from: {url}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        config_text = await response.text()
+                        self.logger.debug(f"Successfully fetched remote config ({len(config_text)} bytes)")
+                        try:
+                            parsed_config = yaml.safe_load(config_text)
+                            self.logger.debug(f"Parsed config: {parsed_config}")
+                            return parsed_config
+                        except yaml.YAMLError as e:
+                            self.logger.error(f"Failed to parse remote config: {e}")
+                            return None
+                    else:
+                        self.logger.error(f"Failed to fetch remote config: HTTP {response.status}")
+                        return None
+        except Exception as e:
+            self.logger.error(f"Error fetching remote config: {e}")
+            if self.debug_mode:
+                import traceback
+                self.logger.debug(traceback.format_exc())
+            return None
+
+    async def _update_config_loop(self):
+        """Periodically update config from remote source."""
+        self.logger.debug("Starting config update loop")
+        # Initial delay to let the app start up
+        await asyncio.sleep(2)
+        
+        while True:
+            try:
+                self.logger.debug("Checking for remote config updates...")
+                remote_config = await self._fetch_remote_config()
+                if remote_config:
+                    self.logger.debug(f"Received remote config: {remote_config}")
+                    # Keep remote settings from local config
+                    remote_config['remote'] = self.config.get('remote', {})
+                    
+                    with self.config_lock:
+                        if remote_config != self.config:
+                            self.logger.debug("Remote config differs from local config, updating...")
+                            self.config = remote_config
+                            self.last_config_update = time.time()
+                            # Save updated config to file
+                            if self._save_config(remote_config):
+                                self.logger.info("Updated config file from remote source")
+                                self.show_notification("Config Updated", "Successfully updated local configuration file")
+                            else:
+                                self.logger.warning("Failed to save updated config to file")
+                                self.show_notification("Config Update Warning", "Remote config updated but failed to save locally")
+                        else:
+                            self.logger.debug("Remote config matches local config, no update needed")
+                else:
+                    self.logger.debug("No remote config received")
+                
+                # Get update interval from config, default to 1 hour
+                update_interval = self.config.get('remote', {}).get('update_interval', 3600)
+                self.logger.debug(f"Next config check in {update_interval} seconds")
+                await asyncio.sleep(update_interval)
+            except Exception as e:
+                self.logger.error(f"Error in config update loop: {e}")
+                if self.debug_mode:
+                    import traceback
+                    self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+                await asyncio.sleep(60)  # Wait a minute before retrying on error
+
+    def show_notification(self, title, message, duration=3):
+        """Show a notification message on the screen."""
+        self.notification = {
+            'title': title,
+            'message': message,
+            'start_time': time.time(),
+            'duration': duration
+        }
+
+    def draw_notification(self):
+        """Draw the current notification if active."""
+        if hasattr(self, 'notification'):
+            current_time = time.time()
+            if current_time - self.notification['start_time'] < self.notification['duration']:
+                # Draw semi-transparent background
+                notification_surface = pygame.Surface((self.screen_width, 80))
+                notification_surface.set_alpha(200)
+                notification_surface.fill((0, 0, 0))
+                self.screen.blit(notification_surface, (0, 0))
+
+                # Draw title and message
+                title_font = pygame.font.Font(None, 36)
+                message_font = pygame.font.Font(None, 24)
+
+                title_text = title_font.render(self.notification['title'], True, (255, 255, 255))
+                message_text = message_font.render(self.notification['message'], True, (200, 200, 200))
+
+                title_rect = title_text.get_rect(centerx=self.screen_width//2, top=10)
+                message_rect = message_text.get_rect(centerx=self.screen_width//2, top=45)
+
+                self.screen.blit(title_text, title_rect)
+                self.screen.blit(message_text, message_rect)
+            else:
+                delattr(self, 'notification')
 
     def process_audio_and_recognize(self, audio_data):
         """Process audio and recognize song in a separate thread."""
@@ -574,34 +891,96 @@ class MusicIdentifier:
     async def run(self):
         """Main application loop."""
         try:
-            pygame.display.set_caption("Music Recognition")
+            pygame.display.set_caption("Music Identifier")
             self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
             self.font = pygame.font.Font(None, 36)
+
+            last_record_time = 0
             
-            running = True
-            last_record_time = time.time()
-            
-            while running:
-                current_time = time.time()
-                
-                # Handle events and update UI
-                running = self.handle_events()
-                if not running:
-                    break
-                
-                self.draw_window()
-                
-                # Start recording if it's time and we're not already recording
-                if not self.recording and not self.processing_thread and current_time - last_record_time >= self.RECORD_SECONDS:
-                    await self.start_recording()
-                    last_record_time = current_time
-                
-                # Check for recognition results
-                await self.check_recognition_result()
-                
-                # Small sleep to prevent high CPU usage
-                await asyncio.sleep(0.016)  # Approximately 60 FPS
-                
+            try:
+                while True:
+                    self.handle_events()
+                    
+                    current_time = time.time()
+                    if self._is_within_operating_hours():
+                        # Check if we should start a new recording
+                        if not self.recording and not self.processing_thread and current_time - last_record_time >= self.RECORD_SECONDS:
+                            await self.start_recording()
+                            last_record_time = current_time
+                        
+                        await self.check_recognition_result()
+                        self.draw_window()
+                    else:
+                        # If outside operating hours, clear the screen and show the custom message
+                        if pygame.display.get_init():
+                            with self.config_lock:
+                                off_hours_message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
+                            
+                            # Get custom message from config, or use default if not found
+                            self.screen.fill((0, 0, 0))
+                            # Create larger font for the message
+                            large_font = pygame.font.Font(None, 96)  # Increased from 36 to 96
+                            
+                            # Wrap the message if it's too long
+                            words = off_hours_message.split()
+                            lines = []
+                            current_line = []
+                            
+                            for word in words:
+                                current_line.append(word)
+                                test_line = ' '.join(current_line)
+                                if large_font.size(test_line)[0] > self.screen_width * 0.8:
+                                    if len(current_line) > 1:
+                                        lines.append(' '.join(current_line[:-1]))
+                                        current_line = [word]
+                                    else:
+                                        lines.append(test_line)
+                                        current_line = []
+                            
+                            if current_line:
+                                lines.append(' '.join(current_line))
+                            
+                            # Calculate total height of all lines
+                            line_height = large_font.get_linesize()
+                            total_height = line_height * len(lines)
+                            start_y = (self.screen_height - total_height) // 2
+                            
+                            # Render each line
+                            for i, line in enumerate(lines):
+                                text_surface = self.render_text_with_outline(
+                                    line,
+                                    large_font,
+                                    (255, 255, 255),  # White text
+                                    (0, 0, 0),        # Black outline
+                                    4                  # Thicker outline for larger text
+                                )
+                                text_rect = text_surface.get_rect(center=(self.screen_width // 2, start_y + i * line_height))
+                                self.screen.blit(text_surface, text_rect)
+                            
+                            pygame.display.flip()
+                        
+                        # Sleep to avoid busy waiting
+                        await asyncio.sleep(1)
+                    
+                    # Draw any active notifications
+                    self.draw_notification()
+                    pygame.display.flip()
+                    
+                    # Small delay to prevent high CPU usage
+                    await asyncio.sleep(0.1)
+                    
+            except KeyboardInterrupt:
+                self.logger.info("Shutting down...")
+                if hasattr(self, 'p') and self.p:
+                    self.p.terminate()
+                if hasattr(self, 'stream') and self.stream:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                if hasattr(self, 'config_update_task') and self.config_update_task:
+                    self.config_update_task.cancel()
+                pygame.quit()
+                sys.exit(0)
+        
         except Exception as e:
             self.logger.error(f"Error in main loop: {e}")
             if self.debug_mode:
@@ -628,7 +1007,15 @@ class MusicIdentifier:
         """Handle pygame events including fullscreen and stretch toggles."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return False
+                if hasattr(self, 'p') and self.p:
+                    self.p.terminate()
+                if hasattr(self, 'stream') and self.stream:
+                    self.stream.stop_stream()
+                    self.stream.close()
+                if hasattr(self, 'config_update_task') and self.config_update_task:
+                    self.config_update_task.cancel()
+                pygame.quit()
+                sys.exit(0)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_f:
                     self.toggle_fullscreen()

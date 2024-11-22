@@ -161,3 +161,6 @@ cython_debug/
 .aider*
 
 debug_output/
+
+# Application specific
+config.yaml

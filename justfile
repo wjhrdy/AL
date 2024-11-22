@@ -2,6 +2,9 @@
 default:
     @just --list
 
+# Load environment variables from .env file if it exists
+set dotenv-load
+
 # Install all dependencies and set up the environment
 install:
     #!/usr/bin/env bash
@@ -111,9 +114,13 @@ install:
 select-device:
     #!/usr/bin/env bash
     set -euo pipefail
-    # List devices but discard the output
+    # If AL_DEVICE is set, use that value
+    if [ "${AL_DEVICE:-}" != "" ]; then
+        printf "%s" "$AL_DEVICE"
+        exit 0
+    fi
+    # Otherwise, prompt for device selection
     .venv/bin/python hello.py --list-devices >/dev/tty
-    # Read selection separately
     read -p "Select input device (number): " DEVICE_NUMBER </dev/tty
     # Validate input is a number
     if [[ "$DEVICE_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -173,6 +180,14 @@ enable-autostart:
         echo "Autostart is only supported on Raspberry Pi"
         exit 1
     fi
+    
+    # Select device and store it in .env if not already set
+    if [ "${AL_DEVICE:-}" = "" ]; then
+        DEVICE=$(just select-device) || exit 1
+        echo "AL_DEVICE=$DEVICE" > .env
+        echo "Stored device selection in .env file"
+    fi
+    
     echo "Creating systemd service file..."
     sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
@@ -183,7 +198,8 @@ enable-autostart:
     Type=simple
     User=$USER
     WorkingDirectory=$(pwd)
-    ExecStart=/usr/local/bin/just run
+    EnvironmentFile=$(pwd)/.env
+    ExecStart=$(pwd)/.venv/bin/python hello.py --device \${AL_DEVICE}
     Restart=always
     Environment=DISPLAY=:0
     Environment=XAUTHORITY=/home/$USER/.Xauthority
@@ -191,12 +207,12 @@ enable-autostart:
     [Install]
     WantedBy=multi-user.target
     EOL
-    echo "Setting permissions..."
-    sudo chmod 644 /etc/systemd/system/al.service
-    echo "Enabling and starting service..."
-    sudo systemctl enable al.service
-    sudo systemctl start al.service
-    echo "Autostart enabled! Check status with: sudo systemctl status al.service"
+        echo "Setting permissions..."
+        sudo chmod 644 /etc/systemd/system/al.service
+        echo "Enabling and starting service..."
+        sudo systemctl enable al.service
+        sudo systemctl start al.service
+        echo "Autostart enabled! Check status with: sudo systemctl status al.service"
 
 # Disable autostart on Raspberry Pi
 disable-autostart:
