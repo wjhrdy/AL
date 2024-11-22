@@ -892,7 +892,11 @@ class MusicIdentifier:
         """Main application loop."""
         try:
             pygame.display.set_caption("Music Identifier")
-            self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+            # Set initial display mode based on fullscreen flag
+            if self.is_fullscreen:
+                self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            else:
+                self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
             self.font = pygame.font.Font(None, 36)
 
             last_record_time = 0
