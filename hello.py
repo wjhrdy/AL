@@ -1031,19 +1031,19 @@ async def main():
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
     parser.add_argument('--list-devices', action='store_true', help='List available audio devices and exit')
     parser.add_argument('--device', type=int, help='Select input device by number')
+    parser.add_argument('--fullscreen', action='store_true', help='Start in fullscreen mode')
     
     try:
         args = parser.parse_args()
     except SystemExit as e:
-        # Handle --help and parsing errors
         raise e
     except Exception as e:
-        # If there's an error parsing args, just use defaults
         print(f"Warning: Error parsing arguments ({str(e)}), using defaults")
         class Args:
             debug = False
             list_devices = False
             device = None
+            fullscreen = False
         args = Args()
     
     if args.list_devices:
@@ -1051,6 +1051,8 @@ async def main():
         sys.exit(0)
     
     app = MusicIdentifier(debug_mode=args.debug, device_index=args.device)
+    if args.fullscreen:
+        app.is_fullscreen = True
     await app.run()
 
 if __name__ == "__main__":

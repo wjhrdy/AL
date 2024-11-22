@@ -181,13 +181,6 @@ enable-autostart:
         exit 1
     fi
     
-    # Select device and store it in .env if not already set
-    if [ "${AL_DEVICE:-}" = "" ]; then
-        DEVICE=$(just select-device) || exit 1
-        echo "AL_DEVICE=$DEVICE" > .env
-        echo "Stored device selection in .env file"
-    fi
-    
     # Store the current path
     CURRENT_PATH=$(pwd)
     
@@ -195,6 +188,13 @@ enable-autostart:
     if ! groups | grep -q audio; then
         sudo usermod -a -G audio $USER
         echo "Added $USER to audio group"
+    fi
+    
+    # Select device and store it in .env if not already set
+    if [ "${AL_DEVICE:-}" = "" ]; then
+        DEVICE=$(just select-device) || exit 1
+        echo "AL_DEVICE=$DEVICE" > .env
+        echo "Stored device selection in .env file"
     fi
     
     echo "Creating systemd service file..."
@@ -215,7 +215,7 @@ enable-autostart:
     Environment=DISPLAY=:0
     Environment=XAUTHORITY=/home/${USER}/.Xauthority
     ExecStartPre=/bin/sleep 5
-    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE}
+    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
     Restart=always
     RestartSec=10
     StandardOutput=journal
