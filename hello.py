@@ -10,7 +10,6 @@ import warnings
 import sys
 import logging
 from pydub import AudioSegment
-from scipy import signal
 import threading
 from queue import Queue, Empty
 
@@ -135,9 +134,13 @@ class MusicIdentifier:
         text_width = text_surface.get_width()
         
         if text_width <= max_width:
-            # If text fits, just center it
-            x_pos = (max_width - text_width) // 2
-            self.screen.blit(text_surface, (x_pos, y_pos))
+            # If text fits, center it precisely using float division and rounding
+            x_pos = round((max_width - text_width) / 2)
+            # Create a temporary surface to handle alpha
+            temp_surface = pygame.Surface((text_width, text_surface.get_height()), pygame.SRCALPHA)
+            temp_surface.blit(text_surface, (0, 0))
+            temp_surface.set_alpha(int(alpha * 255))
+            self.screen.blit(temp_surface, (x_pos, y_pos))
         else:
             # Calculate scroll position
             current_time = time.time()
@@ -165,6 +168,7 @@ class MusicIdentifier:
             
             # Draw the visible portion of the text
             visible_surface.blit(text_surface, (-x_scroll, 0))
+            visible_surface.set_alpha(int(alpha * 255))
             self.screen.blit(visible_surface, ((self.screen_width - max_width) // 2, y_pos))
 
     def draw_window(self):
