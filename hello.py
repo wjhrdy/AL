@@ -87,10 +87,10 @@ class MusicIdentifier:
         self.current_background = None
         
         # Audio parameters
-        self.FORMAT = pyaudio.paInt16  # Changed from paFloat32 to paInt16 for better compatibility
+        self.FORMAT = pyaudio.paFloat32
         self.CHANNELS = 1
-        self.RATE = 44100  # Changed back to standard rate
-        self.CHUNK = 4096  # Increased buffer size for more stability
+        self.RATE = 16000  # Changed from 44100 to match USB Camera's sample rate
+        self.CHUNK = 1024  # Smaller chunk size for smoother recording
         self.RECORD_SECONDS = 5
         
         # Audio recording state
