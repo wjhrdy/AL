@@ -114,6 +114,10 @@ install:
 select-device:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Source .env file if it exists
+    if [ -f .env ]; then
+        source .env
+    fi
     # If AL_DEVICE is set, use that value
     if [ "${AL_DEVICE:-}" != "" ]; then
         printf "%s" "$AL_DEVICE"
@@ -184,11 +188,16 @@ enable-autostart:
     # Store the current path
     CURRENT_PATH=$(pwd)
     
-    # Add current user to audio group if not already added
-    if ! groups | grep -q audio; then
-        sudo usermod -a -G audio $USER
-        echo "Added $USER to audio group"
-    fi
+    # Add current user to audio and video groups if not already added
+    for GROUP in audio video; do
+        if ! groups | grep -q $GROUP; then
+            sudo usermod -a -G $GROUP $USER
+            echo "Added $USER to $GROUP group"
+        fi
+    done
+    
+    # Ensure audio configuration is correct
+    sudo usermod -a -G pulse,pulse-access $USER
     
     # Select device and store it in .env if not already set
     if [ "${AL_DEVICE:-}" = "" ]; then
@@ -197,11 +206,17 @@ enable-autostart:
         echo "Stored device selection in .env file"
     fi
     
+    # Create pulseaudio config directory if it doesn't exist
+    mkdir -p ~/.config/pulse
+    
+    # Configure pulseaudio to auto-respawn
+    echo "autospawn = yes" > ~/.config/pulse/client.conf
+    
     echo "Creating systemd service file..."
     sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=network.target sound.target pulseaudio.service
+    After=network.target sound.target graphical.target
     Wants=pulseaudio.service
 
     [Service]
@@ -214,7 +229,10 @@ enable-autostart:
     Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
     Environment=DISPLAY=:0
     Environment=XAUTHORITY=/home/${USER}/.Xauthority
-    ExecStartPre=/bin/sleep 5
+    Environment=SDL_VIDEODRIVER=x11
+    Environment=PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native
+    ExecStartPre=/bin/sleep 10
+    ExecStartPre=/usr/bin/pulseaudio --start --log-target=syslog
     ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
     Restart=always
     RestartSec=10
@@ -225,11 +243,17 @@ enable-autostart:
     MemorySwapMax=512M
 
     [Install]
-    WantedBy=multi-user.target
+    WantedBy=graphical.target
     EOL
     
     echo "Setting permissions..."
     sudo chmod 644 /etc/systemd/system/al.service
+    
+    # Ensure pulseaudio is installed
+    if ! command -v pulseaudio >/dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y pulseaudio
+    fi
     
     # Reload systemd to pick up changes
     sudo systemctl daemon-reload
