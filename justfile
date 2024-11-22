@@ -32,7 +32,8 @@ install:
         sudo apt-get update
         # Install Python with specific version
         sudo apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-venv
-        sudo apt-get install -y python3-pygame libportaudio2
+        # Install audio dependencies including those needed for PyAudio
+        sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc
     else
         echo "Unsupported operating system: $OSTYPE"
         exit 1
