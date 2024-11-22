@@ -220,6 +220,8 @@ enable-autostart:
     RestartSec=10
     StandardOutput=journal
     StandardError=journal
+    MemoryMax=512M
+    MemorySwapMax=0
 
     [Install]
     WantedBy=multi-user.target

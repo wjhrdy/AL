@@ -759,12 +759,14 @@ class MusicIdentifier:
                 channels=self.CHANNELS
             )
             
-            if self.debug_mode:
-                self.last_audio_segment = audio_segment
+            # Explicitly clean up memory
+            del audio_array
+            del audio_int16
             
             # Export to WAV format in memory
             buffer = audio_segment.export(format="wav")
             audio_bytes = buffer.read()
+            buffer.close()  # Explicitly close the buffer
 
             # Run song recognition
             loop = asyncio.new_event_loop()
@@ -802,38 +804,35 @@ class MusicIdentifier:
 
     def record_audio(self):
         """Record audio in a separate thread."""
-        stream = self.p.open(
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.RATE,
-            input=True,
-            input_device_index=self.input_device_index,
-            frames_per_buffer=self.CHUNK
-        )
-        
-        self.frames = []
-        start_time = time.time()
-        
-        while time.time() - start_time < self.RECORD_SECONDS and self.recording:
-            try:
-                data = stream.read(self.CHUNK, exception_on_overflow=False)
-                self.frames.append(data)
-                time.sleep(0.001)  # Small sleep to prevent thread from hogging CPU
-            except Exception as e:
-                self.logger.error(f"Error recording audio: {e}")
-                break
-        
-        stream.stop_stream()
-        stream.close()
-        
-        # Start processing in a new thread
-        self.processing_thread = threading.Thread(
-            target=self.process_audio_and_recognize,
-            args=(self.frames.copy(),)
-        )
-        self.processing_thread.start()
-        
-        self.recording = False
+        stream = None
+        try:
+            stream = self.p.open(
+                format=self.FORMAT,
+                channels=self.CHANNELS,
+                rate=self.RATE,
+                input=True,
+                input_device_index=self.input_device_index,
+                frames_per_buffer=self.CHUNK
+            )
+            
+            self.frames = []
+            start_time = time.time()
+            
+            while time.time() - start_time < self.RECORD_SECONDS and self.recording:
+                try:
+                    data = stream.read(self.CHUNK, exception_on_overflow=False)
+                    self.frames.append(data)
+                    await asyncio.sleep(0.001)  # Use asyncio.sleep instead of time.sleep
+                except Exception as e:
+                    self.logger.error(f"Error recording audio: {e}")
+                    break
+        finally:
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception as e:
+                    self.logger.error(f"Error closing audio stream: {e}")
 
     async def check_recognition_result(self):
         """Check for song recognition results."""
@@ -900,9 +899,23 @@ class MusicIdentifier:
             self.font = pygame.font.Font(None, 36)
 
             last_record_time = 0
+            last_gc_time = time.time()  # Add garbage collection timing
             
             try:
                 while True:
+                    # Force garbage collection periodically
+                    current_time = time.time()
+                    if current_time - last_gc_time > 60:  # Every minute
+                        import gc
+                        gc.collect()
+                        last_gc_time = current_time
+                    
+                    await asyncio.sleep(0.1)  # Prevent CPU overload
+                    
+                    if not self._is_within_operating_hours():
+                        await asyncio.sleep(1)  # Longer sleep when inactive
+                        continue
+
                     self.handle_events()
                     
                     current_time = time.time()
