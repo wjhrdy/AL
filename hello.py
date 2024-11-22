@@ -17,8 +17,9 @@ from queue import Queue, Empty
 warnings.filterwarnings('ignore', category=Warning)
 
 class MusicIdentifier:
-    def __init__(self, debug_mode=False):
+    def __init__(self, debug_mode=False, device_index=None):
         self.debug_mode = debug_mode
+        self.device_index = device_index
         self.start_time = time.time()
         
         # Set up logging
@@ -91,16 +92,120 @@ class MusicIdentifier:
         self.logger.debug("Initialization complete")
     
     def _find_input_device(self):
-        """Find and return the first available input device index"""
-        for i in range(self.p.get_device_count()):
-            device_info = self.p.get_device_info_by_index(i)
-            if self.debug_mode:
-                self.logger.info(f"\nDevice {i}: {device_info['name']}")
-                self.logger.info(f"  Max Input Channels: {device_info['maxInputChannels']}")
+        """Find and return the selected input device index"""
+        devices = []
+        info = self.p.get_host_api_info_by_index(0)
+        numdevices = info.get('deviceCount')
+        
+        # Get default input device
+        try:
+            default_device = self.p.get_default_input_device_info()
+            default_index = default_device['index']
+            self.logger.info(f"Default input device: {default_device['name']} (index: {default_index})")
+        except IOError:
+            default_index = None
+            self.logger.warning("No default input device found")
+        
+        # List all input devices
+        for i in range(numdevices):
+            try:
+                device_info = self.p.get_device_info_by_index(i)
+                if device_info.get('maxInputChannels') > 0:
+                    devices.append((i, device_info))
+                    if self.debug_mode:
+                        self.logger.info(f"Found input device {i}: {device_info['name']}")
+                        self.logger.info(f"  Max Input Channels: {device_info['maxInputChannels']}")
+                        self.logger.info(f"  Default Sample Rate: {device_info['defaultSampleRate']}")
+            except IOError as e:
+                self.logger.warning(f"Error getting device info for index {i}: {e}")
+        
+        if not devices:
+            self.logger.error("No input devices found!")
+            sys.exit(1)
+        
+        # Check if a specific device was requested
+        if self.device_index is not None:
+            for idx, (dev_idx, dev_info) in enumerate(devices):
+                if dev_idx == self.device_index:
+                    self.logger.info(f"Using selected device {self.device_index}: {dev_info['name']}")
+                    return self.device_index
+            self.logger.error(f"Selected device index {self.device_index} is not valid")
+            # Fall through to interactive selection
+        
+        # If there's only one device, use it automatically
+        if len(devices) == 1:
+            dev_idx, dev_info = devices[0]
+            print(f"\nAutomatically selecting the only available device: {dev_info['name']}")
+            return dev_idx
+        
+        # If we have a default device and no specific device was requested, use it
+        if default_index is not None and self.device_index is None:
+            for idx, (dev_idx, dev_info) in enumerate(devices):
+                if dev_idx == default_index:
+                    print(f"\nUsing default input device: {dev_info['name']}")
+                    return dev_idx
+        
+        # Interactive device selection
+        while True:
+            print("\nAvailable input devices:")
+            for idx, (dev_idx, dev_info) in enumerate(devices):
+                is_default = dev_idx == default_index
+                print(f"{dev_idx}: {dev_info['name']}{' (default)' if is_default else ''}")
+            
+            try:
+                selection = input("\nSelect input device (number or Enter for default): ").strip()
+                if not selection and default_index is not None:
+                    # Use default device if Enter is pressed
+                    for idx, (dev_idx, dev_info) in enumerate(devices):
+                        if dev_idx == default_index:
+                            print(f"Using default device: {dev_info['name']}")
+                            return dev_idx
+                
+                if not selection:
+                    continue
+                
+                device_index = int(selection)
+                for idx, (dev_idx, dev_info) in enumerate(devices):
+                    if dev_idx == device_index:
+                        self.logger.info(f"Using device {device_index}: {dev_info['name']}")
+                        return device_index
+                print("Invalid selection. Please try again.")
+            except ValueError:
+                print("Please enter a number or press Enter for default device.")
+            except KeyboardInterrupt:
+                print("\nExiting...")
+                sys.exit(0)
+    
+    def list_devices():
+        """List all available input devices without starting the program"""
+        p = pyaudio.PyAudio()
+        info = p.get_host_api_info_by_index(0)
+        numdevices = info.get('deviceCount')
+        
+        print("\nAudio Host API:", p.get_default_host_api_info()['name'])
+        print("\nAvailable input devices:")
+        
+        for i in range(numdevices):
+            device_info = p.get_device_info_by_index(i)
+            # Print all device info for debugging
+            print(f"\nDevice {i}:")
+            for key, value in device_info.items():
+                print(f"  {key}: {value}")
+            
+            # Check if it's an input device
             if device_info.get('maxInputChannels') > 0:
-                return i
-        self.logger.error("No input devices found!")
-        sys.exit(1)
+                print(f"\n==> Input Device {i}: {device_info['name']}")
+                print(f"    Default Sample Rate: {device_info['defaultSampleRate']}")
+                print(f"    Max Input Channels: {device_info['maxInputChannels']}")
+        
+        # Print default input device
+        try:
+            default_input = p.get_default_input_device_info()
+            print(f"\nDefault Input Device: {default_input['name']} (index: {default_input['index']})")
+        except IOError:
+            print("\nNo default input device found")
+        
+        p.terminate()
 
     def render_text_with_outline(self, text, font, color, outline_color=(0, 0, 0), outline_width=2):
         """Render text with an outline for better visibility."""
@@ -534,10 +639,33 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser(description='Music Recognition App')
     parser.add_argument('--debug', action='store_true', help='Enable debug mode')
-    args = parser.parse_args()
+    parser.add_argument('--list-devices', action='store_true', help='List available audio devices and exit')
+    parser.add_argument('--device', type=int, help='Select input device by number')
     
-    app = MusicIdentifier(debug_mode=args.debug)
+    try:
+        args = parser.parse_args()
+    except SystemExit as e:
+        # Handle --help and parsing errors
+        raise e
+    except Exception as e:
+        # If there's an error parsing args, just use defaults
+        print(f"Warning: Error parsing arguments ({str(e)}), using defaults")
+        class Args:
+            debug = False
+            list_devices = False
+            device = None
+        args = Args()
+    
+    if args.list_devices:
+        MusicIdentifier.list_devices()
+        sys.exit(0)
+    
+    app = MusicIdentifier(debug_mode=args.debug, device_index=args.device)
     await app.run()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExiting...")
+        sys.exit(0)

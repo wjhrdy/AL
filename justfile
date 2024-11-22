@@ -107,13 +107,35 @@ install:
     
     echo "Installation complete! 🎉"
 
+# Helper recipe to select audio device
+select-device:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # List devices but discard the output
+    .venv/bin/python hello.py --list-devices >/dev/tty
+    # Read selection separately
+    read -p "Select input device (number): " DEVICE_NUMBER </dev/tty
+    # Validate input is a number
+    if [[ "$DEVICE_NUMBER" =~ ^[0-9]+$ ]]; then
+        printf "%d" "$DEVICE_NUMBER"
+    else
+        echo "Invalid input. Please enter a number." >&2
+        exit 1
+    fi
+
 # Run the application
 run: 
-    .venv/bin/python hello.py
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DEVICE=$(just select-device) || exit 1
+    .venv/bin/python hello.py --device "$DEVICE"
 
-# Run the application in debug mode (will exit after 30 seconds)
+# Run the application in debug mode
 debug:
-    .venv/bin/python hello.py --debug
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DEVICE=$(just select-device) || exit 1
+    .venv/bin/python hello.py --debug --device "$DEVICE"
 
 # Clean up virtual environment and cache
 clean:
