@@ -73,7 +73,7 @@ class MusicIdentifier:
         # Audio parameters
         self.FORMAT = pyaudio.paFloat32
         self.CHANNELS = 1
-        self.RATE = 44100
+        self.RATE = 16000  # Changed from 44100 to match USB Camera's sample rate
         self.CHUNK = 1024  # Smaller chunk size for smoother recording
         self.RECORD_SECONDS = 5
         
@@ -107,11 +107,12 @@ class MusicIdentifier:
             self.logger.warning("No default input device found")
         
         # List all input devices
+        input_devices = []  # Store actual input devices with their original indices
         for i in range(numdevices):
             try:
                 device_info = self.p.get_device_info_by_index(i)
                 if device_info.get('maxInputChannels') > 0:
-                    devices.append((i, device_info))
+                    input_devices.append((i, device_info))  # Keep original index
                     if self.debug_mode:
                         self.logger.info(f"Found input device {i}: {device_info['name']}")
                         self.logger.info(f"  Max Input Channels: {device_info['maxInputChannels']}")
@@ -119,54 +120,56 @@ class MusicIdentifier:
             except IOError as e:
                 self.logger.warning(f"Error getting device info for index {i}: {e}")
         
-        if not devices:
+        if not input_devices:
             self.logger.error("No input devices found!")
             sys.exit(1)
         
         # Check if a specific device was requested
         if self.device_index is not None:
-            for idx, (dev_idx, dev_info) in enumerate(devices):
-                if dev_idx == self.device_index:
+            # Look up the device by its original index
+            for original_idx, dev_info in input_devices:
+                if original_idx == self.device_index:
                     self.logger.info(f"Using selected device {self.device_index}: {dev_info['name']}")
                     return self.device_index
             self.logger.error(f"Selected device index {self.device_index} is not valid")
             # Fall through to interactive selection
         
         # If there's only one device, use it automatically
-        if len(devices) == 1:
-            dev_idx, dev_info = devices[0]
+        if len(input_devices) == 1:
+            dev_idx, dev_info = input_devices[0]
             print(f"\nAutomatically selecting the only available device: {dev_info['name']}")
             return dev_idx
         
         # If we have a default device and no specific device was requested, use it
         if default_index is not None and self.device_index is None:
-            for idx, (dev_idx, dev_info) in enumerate(devices):
-                if dev_idx == default_index:
+            for original_idx, dev_info in input_devices:
+                if original_idx == default_index:
                     print(f"\nUsing default input device: {dev_info['name']}")
-                    return dev_idx
+                    return original_idx
         
         # Interactive device selection
         while True:
             print("\nAvailable input devices:")
-            for idx, (dev_idx, dev_info) in enumerate(devices):
-                is_default = dev_idx == default_index
-                print(f"{dev_idx}: {dev_info['name']}{' (default)' if is_default else ''}")
+            for original_idx, dev_info in input_devices:
+                is_default = original_idx == default_index
+                print(f"{original_idx}: {dev_info['name']}{' (default)' if is_default else ''}")
             
             try:
                 selection = input("\nSelect input device (number or Enter for default): ").strip()
                 if not selection and default_index is not None:
                     # Use default device if Enter is pressed
-                    for idx, (dev_idx, dev_info) in enumerate(devices):
-                        if dev_idx == default_index:
+                    for original_idx, dev_info in input_devices:
+                        if original_idx == default_index:
                             print(f"Using default device: {dev_info['name']}")
-                            return dev_idx
+                            return original_idx
                 
                 if not selection:
                     continue
                 
                 device_index = int(selection)
-                for idx, (dev_idx, dev_info) in enumerate(devices):
-                    if dev_idx == device_index:
+                # Look up the device by its original index
+                for original_idx, dev_info in input_devices:
+                    if original_idx == device_index:
                         self.logger.info(f"Using device {device_index}: {dev_info['name']}")
                         return device_index
                 print("Invalid selection. Please try again.")
