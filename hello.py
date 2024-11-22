@@ -150,8 +150,9 @@ class MusicIdentifier:
                 if original_idx == self.device_index:
                     self.logger.info(f"Using selected device {self.device_index}: {dev_info['name']}")
                     return self.device_index
+            # If device_index is not valid, exit with error instead of falling through
             self.logger.error(f"Selected device index {self.device_index} is not valid")
-            # Fall through to interactive selection
+            sys.exit(1)
         
         # If there's only one device, use it automatically
         if len(input_devices) == 1:
@@ -160,7 +161,7 @@ class MusicIdentifier:
             return dev_idx
         
         # If we have a default device and no specific device was requested, use it
-        if default_index is not None and self.device_index is None:
+        if default_index is not None:
             for original_idx, dev_info in input_devices:
                 if original_idx == default_index:
                     print(f"\nUsing default input device: {dev_info['name']}")
@@ -172,7 +173,7 @@ class MusicIdentifier:
             for original_idx, dev_info in input_devices:
                 is_default = original_idx == default_index
                 print(f"{original_idx}: {dev_info['name']}{' (default)' if is_default else ''}")
-            
+        
             try:
                 selection = input("\nSelect input device (number or Enter for default): ").strip()
                 if not selection and default_index is not None:
@@ -181,10 +182,10 @@ class MusicIdentifier:
                         if original_idx == default_index:
                             print(f"Using default device: {dev_info['name']}")
                             return original_idx
-                
+            
                 if not selection:
                     continue
-                
+            
                 device_index = int(selection)
                 # Look up the device by its original index
                 for original_idx, dev_info in input_devices:
@@ -1037,6 +1038,18 @@ async def main():
     if args.list_devices:
         MusicIdentifier.list_devices()
         sys.exit(0)
+    
+    # Check for AL_DEVICE environment variable
+    env_device = os.environ.get('AL_DEVICE')
+    if env_device is not None:
+        try:
+            device_index = int(env_device)
+            if args.device is not None:
+                print(f"Warning: Both --device argument ({args.device}) and AL_DEVICE environment variable ({device_index}) are set.")
+                print(f"Using AL_DEVICE value: {device_index}")
+            args.device = device_index
+        except ValueError:
+            print(f"Warning: Invalid AL_DEVICE value: {env_device}. Must be an integer.")
     
     app = MusicIdentifier(debug_mode=args.debug, device_index=args.device)
     if args.fullscreen:
