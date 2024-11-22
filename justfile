@@ -188,18 +188,21 @@ enable-autostart:
         echo "Stored device selection in .env file"
     fi
     
+    # Store the current path
+    CURRENT_PATH=$(pwd)
+    
     echo "Creating systemd service file..."
-    sudo tee /etc/systemd/system/al.service > /dev/null << 'EOL'
+    sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
     After=network.target sound.target
 
     [Service]
     Type=simple
-    User=$USER
-    WorkingDirectory=$(pwd)
-    EnvironmentFile=$(pwd)/.env
-    ExecStart=$(pwd)/.venv/bin/python hello.py --device ${AL_DEVICE}
+    User=${USER}
+    WorkingDirectory=${CURRENT_PATH}
+    EnvironmentFile=${CURRENT_PATH}/.env
+    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE}
     Restart=always
     RestartSec=10
     StandardOutput=journal
