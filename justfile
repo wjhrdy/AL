@@ -189,30 +189,32 @@ enable-autostart:
     fi
     
     echo "Creating systemd service file..."
-    sudo tee /etc/systemd/system/al.service > /dev/null << EOL
+    sudo tee /etc/systemd/system/al.service > /dev/null << 'EOL'
     [Unit]
     Description=AL Music Recognition
-    After=network.target
+    After=network.target sound.target
 
     [Service]
     Type=simple
     User=$USER
     WorkingDirectory=$(pwd)
     EnvironmentFile=$(pwd)/.env
-    ExecStart=$(pwd)/.venv/bin/python hello.py --device \${AL_DEVICE}
+    ExecStart=$(pwd)/.venv/bin/python hello.py --device ${AL_DEVICE}
     Restart=always
-    Environment=DISPLAY=:0
-    Environment=XAUTHORITY=/home/$USER/.Xauthority
+    RestartSec=10
+    StandardOutput=journal
+    StandardError=journal
 
     [Install]
     WantedBy=multi-user.target
     EOL
-        echo "Setting permissions..."
-        sudo chmod 644 /etc/systemd/system/al.service
-        echo "Enabling and starting service..."
-        sudo systemctl enable al.service
-        sudo systemctl start al.service
-        echo "Autostart enabled! Check status with: sudo systemctl status al.service"
+    
+    echo "Setting permissions..."
+    sudo chmod 644 /etc/systemd/system/al.service
+    echo "Enabling and starting service..."
+    sudo systemctl enable al.service
+    sudo systemctl start al.service
+    echo "Autostart enabled! Check status with: sudo systemctl status al.service"
 
 # Disable autostart on Raspberry Pi
 disable-autostart:
