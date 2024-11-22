@@ -43,9 +43,14 @@ install:
         echo "Installing uv package manager..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
         # Ensure uv is in PATH for the rest of the script
-        eval "$($HOME/.local/bin/uv --shell-completion bash)"
         export PATH="$HOME/.local/bin:$PATH"
         hash -r
+        # Verify uv is now available
+        if ! command -v uv &> /dev/null; then
+            echo "Error: uv installation successful but command not found in PATH"
+            echo "Please run: export PATH=\"\$HOME/.local/bin:\$PATH\""
+            exit 1
+        fi
     fi
     
     # Create virtual environment and install dependencies
