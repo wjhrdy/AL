@@ -189,7 +189,7 @@ enable-autostart:
     CURRENT_PATH=$(pwd)
     
     # Add current user to necessary groups
-    for GROUP in audio video pulse pulse-access; do
+    for GROUP in audio video; do
         if ! groups | grep -q $GROUP; then
             sudo usermod -a -G $GROUP $USER
             echo "Added $USER to $GROUP group"
@@ -209,7 +209,81 @@ enable-autostart:
         sudo apt-get install -y pulseaudio pulseaudio-utils
     fi
     
-    # Configure PulseAudio system-wide
+    # Create user PulseAudio config
+    mkdir -p ~/.config/pulse
+    tee ~/.config/pulse/client.conf > /dev/null << EOL
+    autospawn = yes
+    daemon-binary = /usr/bin/pulseaudio
+    enable-shm = yes
+    EOL
+    
+    # Create user PulseAudio daemon config
+    tee ~/.config/pulse/daemon.conf > /dev/null << EOL
+    exit-idle-time = -1
+    flat-volumes = no
+    EOL
+    
+    echo "Creating systemd service file..."
+    sudo tee /etc/systemd/system/al.service > /dev/null << EOL
+    [Unit]
+    Description=AL Music Recognition
+    After=network.target sound.target graphical.target
+    StartLimitIntervalSec=0
+
+    [Service]
+    Type=simple
+    User=${USER}
+    Group=audio
+    WorkingDirectory=${CURRENT_PATH}
+    EnvironmentFile=${CURRENT_PATH}/.env
+    Environment=HOME=/home/${USER}
+    Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
+    Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
+    Environment=DISPLAY=:0
+    Environment=XAUTHORITY=/home/${USER}/.Xauthority
+    Environment=SDL_VIDEODRIVER=x11
+
+    # Setup runtime directory
+    ExecStartPre=/bin/mkdir -p /run/user/$(id -u)/pulse
+    ExecStartPre=/bin/chown -R ${USER}:${USER} /run/user/$(id -u)
+    ExecStartPre=/bin/chmod 700 /run/user/$(id -u)
+
+    # Kill any existing PulseAudio
+    ExecStartPre=-/usr/bin/pulseaudio --kill
+
+    # Start PulseAudio in system mode
+    ExecStartPre=/usr/bin/pulseaudio --start --system --disallow-exit --disallow-module-loading --log-target=journal
+
+    # Wait for PulseAudio to be ready
+    ExecStartPre=/bin/sleep 3
+
+    # Main application
+    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
+
+    # Cleanup
+    ExecStopPost=-/usr/bin/pulseaudio --kill
+
+    Restart=always
+    RestartSec=10
+    StandardOutput=journal
+    StandardError=journal
+    MemoryHigh=768M
+    MemoryMax=1G
+    MemorySwapMax=512M
+
+    [Install]
+    WantedBy=graphical.target
+    EOL
+    
+    echo "Setting permissions..."
+    sudo chmod 644 /etc/systemd/system/al.service
+    
+    # Allow PulseAudio to run in system mode
+    sudo adduser ${USER} pulse-access || true
+    sudo adduser ${USER} audio || true
+    
+    # Configure PulseAudio system mode
+    sudo mkdir -p /etc/pulse
     sudo tee /etc/pulse/system.pa > /dev/null << EOL
     #!/usr/bin/pulseaudio -nF
     load-module module-device-restore
@@ -230,74 +304,12 @@ enable-autostart:
     load-module module-native-protocol-tcp auth-anonymous=1
     EOL
     
-    # Create user PulseAudio config
-    mkdir -p ~/.config/pulse
-    tee ~/.config/pulse/client.conf > /dev/null << EOL
-    autospawn = yes
-    daemon-binary = /usr/bin/pulseaudio
-    enable-shm = yes
-    EOL
-    
-    # Create user PulseAudio daemon config
-    tee ~/.config/pulse/daemon.conf > /dev/null << EOL
-    exit-idle-time = -1
-    flat-volumes = no
-    EOL
-    
-    echo "Creating systemd service file..."
-    sudo tee /etc/systemd/system/al.service > /dev/null << EOL
-    [Unit]
-    Description=AL Music Recognition
-    After=network.target sound.target graphical.target pulseaudio.service
-    Requires=pulseaudio.service
-
-    [Service]
-    Type=simple
-    User=${USER}
-    Group=audio
-    WorkingDirectory=${CURRENT_PATH}
-    EnvironmentFile=${CURRENT_PATH}/.env
-    Environment=HOME=/home/${USER}
-    Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
-    Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
-    Environment=DISPLAY=:0
-    Environment=XAUTHORITY=/home/${USER}/.Xauthority
-    Environment=SDL_VIDEODRIVER=x11
-    Environment=PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native
-    
-    # Ensure runtime directory exists
-    ExecStartPre=/bin/mkdir -p /run/user/$(id -u)/pulse
-    ExecStartPre=/bin/chown -R ${USER}:${USER} /run/user/$(id -u)
-    ExecStartPre=/bin/chmod 700 /run/user/$(id -u)
-    
-    # Start PulseAudio if not running
-    ExecStartPre=/bin/sh -c 'if ! pulseaudio --check; then pulseaudio --start --log-target=syslog; sleep 2; fi'
-    
-    # Main application
-    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
-    
-    Restart=always
-    RestartSec=10
-    StandardOutput=journal
-    StandardError=journal
-    MemoryHigh=768M
-    MemoryMax=1G
-    MemorySwapMax=512M
-
-    [Install]
-    WantedBy=graphical.target
-    EOL
-    
-    echo "Setting permissions..."
-    sudo chmod 644 /etc/systemd/system/al.service
-    
-    # Stop any running PulseAudio instances
+    # Kill any running PulseAudio instances
     pulseaudio --kill || true
     sleep 2
     
-    # Reload systemd and restart PulseAudio
+    # Reload systemd
     sudo systemctl daemon-reload
-    systemctl --user restart pulseaudio
     
     echo "Enabling and starting service..."
     sudo systemctl enable al.service
