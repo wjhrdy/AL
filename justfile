@@ -188,16 +188,13 @@ enable-autostart:
     # Store the current path
     CURRENT_PATH=$(pwd)
     
-    # Add current user to audio and video groups if not already added
-    for GROUP in audio video; do
+    # Add current user to necessary groups
+    for GROUP in audio video pulse pulse-access; do
         if ! groups | grep -q $GROUP; then
             sudo usermod -a -G $GROUP $USER
             echo "Added $USER to $GROUP group"
         fi
     done
-    
-    # Ensure audio configuration is correct
-    sudo usermod -a -G pulse,pulse-access $USER
     
     # Select device and store it in .env if not already set
     if [ "${AL_DEVICE:-}" = "" ]; then
@@ -206,18 +203,53 @@ enable-autostart:
         echo "Stored device selection in .env file"
     fi
     
-    # Create pulseaudio config directory if it doesn't exist
-    mkdir -p ~/.config/pulse
+    # Ensure pulseaudio is installed
+    if ! command -v pulseaudio >/dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y pulseaudio pulseaudio-utils
+    fi
     
-    # Configure pulseaudio to auto-respawn
-    echo "autospawn = yes" > ~/.config/pulse/client.conf
+    # Configure PulseAudio system-wide
+    sudo tee /etc/pulse/system.pa > /dev/null << EOL
+    #!/usr/bin/pulseaudio -nF
+    load-module module-device-restore
+    load-module module-stream-restore
+    load-module module-card-restore
+    load-module module-udev-detect
+    load-module module-native-protocol-unix auth-anonymous=1
+    load-module module-default-device-restore
+    load-module module-rescue-streams
+    load-module module-always-sink
+    load-module module-intended-roles
+    load-module module-suspend-on-idle
+    load-module module-position-event-sounds
+    load-module module-role-cork
+    load-module module-filter-heuristics
+    load-module module-filter-apply
+    load-module module-switch-on-port-available
+    load-module module-native-protocol-tcp auth-anonymous=1
+    EOL
+    
+    # Create user PulseAudio config
+    mkdir -p ~/.config/pulse
+    tee ~/.config/pulse/client.conf > /dev/null << EOL
+    autospawn = yes
+    daemon-binary = /usr/bin/pulseaudio
+    enable-shm = yes
+    EOL
+    
+    # Create user PulseAudio daemon config
+    tee ~/.config/pulse/daemon.conf > /dev/null << EOL
+    exit-idle-time = -1
+    flat-volumes = no
+    EOL
     
     echo "Creating systemd service file..."
     sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=network.target sound.target graphical.target
-    Wants=pulseaudio.service
+    After=network.target sound.target graphical.target pulseaudio.service
+    Requires=pulseaudio.service
 
     [Service]
     Type=simple
@@ -225,15 +257,25 @@ enable-autostart:
     Group=audio
     WorkingDirectory=${CURRENT_PATH}
     EnvironmentFile=${CURRENT_PATH}/.env
+    Environment=HOME=/home/${USER}
     Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
     Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
     Environment=DISPLAY=:0
     Environment=XAUTHORITY=/home/${USER}/.Xauthority
     Environment=SDL_VIDEODRIVER=x11
     Environment=PULSE_SERVER=unix:/run/user/$(id -u)/pulse/native
-    ExecStartPre=/bin/sleep 10
-    ExecStartPre=/usr/bin/pulseaudio --start --log-target=syslog
+    
+    # Ensure runtime directory exists
+    ExecStartPre=/bin/mkdir -p /run/user/$(id -u)/pulse
+    ExecStartPre=/bin/chown -R ${USER}:${USER} /run/user/$(id -u)
+    ExecStartPre=/bin/chmod 700 /run/user/$(id -u)
+    
+    # Start PulseAudio if not running
+    ExecStartPre=/bin/sh -c 'if ! pulseaudio --check; then pulseaudio --start --log-target=syslog; sleep 2; fi'
+    
+    # Main application
     ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
+    
     Restart=always
     RestartSec=10
     StandardOutput=journal
@@ -249,19 +291,19 @@ enable-autostart:
     echo "Setting permissions..."
     sudo chmod 644 /etc/systemd/system/al.service
     
-    # Ensure pulseaudio is installed
-    if ! command -v pulseaudio >/dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y pulseaudio
-    fi
+    # Stop any running PulseAudio instances
+    pulseaudio --kill || true
+    sleep 2
     
-    # Reload systemd to pick up changes
+    # Reload systemd and restart PulseAudio
     sudo systemctl daemon-reload
+    systemctl --user restart pulseaudio
     
     echo "Enabling and starting service..."
     sudo systemctl enable al.service
     sudo systemctl start al.service
     echo "Autostart enabled! Check status with: sudo systemctl status al.service"
+    echo "View logs with: journalctl -u al.service -f"
 
 # Disable autostart on Raspberry Pi
 disable-autostart:
