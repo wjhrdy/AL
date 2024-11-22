@@ -191,17 +191,30 @@ enable-autostart:
     # Store the current path
     CURRENT_PATH=$(pwd)
     
+    # Add current user to audio group if not already added
+    if ! groups | grep -q audio; then
+        sudo usermod -a -G audio $USER
+        echo "Added $USER to audio group"
+    fi
+    
     echo "Creating systemd service file..."
     sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=network.target sound.target
+    After=network.target sound.target pulseaudio.service
+    Wants=pulseaudio.service
 
     [Service]
     Type=simple
     User=${USER}
+    Group=audio
     WorkingDirectory=${CURRENT_PATH}
     EnvironmentFile=${CURRENT_PATH}/.env
+    Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
+    Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
+    Environment=DISPLAY=:0
+    Environment=XAUTHORITY=/home/${USER}/.Xauthority
+    ExecStartPre=/bin/sleep 5
     ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE}
     Restart=always
     RestartSec=10
@@ -210,10 +223,14 @@ enable-autostart:
 
     [Install]
     WantedBy=multi-user.target
-    EOL
+EOL
     
     echo "Setting permissions..."
     sudo chmod 644 /etc/systemd/system/al.service
+    
+    # Reload systemd to pick up changes
+    sudo systemctl daemon-reload
+    
     echo "Enabling and starting service..."
     sudo systemctl enable al.service
     sudo systemctl start al.service
