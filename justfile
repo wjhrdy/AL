@@ -42,6 +42,10 @@ install:
     if ! command -v uv &> /dev/null; then
         echo "Installing uv package manager..."
         curl -LsSf https://astral.sh/uv/install.sh | sh
+        # Ensure uv is in PATH for the rest of the script
+        eval "$($HOME/.local/bin/uv --shell-completion bash)"
+        export PATH="$HOME/.local/bin:$PATH"
+        hash -r
     fi
     
     # Create virtual environment and install dependencies

@@ -21,6 +21,10 @@ The installation process will automatically detect your operating system and ins
 
 ```bash
 # Clone the repository
+# on debian:
+sudo apt-get update
+sudo apt install git curl
+
 git clone https://github.com/wjhrdy/AL.git
 cd AL
 
