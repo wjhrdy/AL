@@ -1,0 +1,14 @@
+[project]
+name = "al"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.26.4",
+    "pyaudio>=0.2.14",
+    "pydub>=0.25.1",
+    "pygame>=2.6.1",
+    "requests>=2.32.3",
+    "shazamio>=0.6.0",
+]
