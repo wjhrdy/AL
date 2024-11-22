@@ -88,48 +88,59 @@ class MusicIdentifier:
         
         # Audio parameters
         self.FORMAT = pyaudio.paFloat32
-        self.CHANNELS = 1
-        self.RATE = 16000  # Changed from 44100 to match USB Camera's sample rate
-        self.CHUNK = 1024  # Smaller chunk size for smoother recording
+        self.CHANNELS = 1  # Will be updated when device is selected
+        self.RATE = 16000  # Will be updated when device is selected
+        self.CHUNK = 1024
         self.RECORD_SECONDS = 5
-        
-        # Audio recording state
-        self.recording = False
-        self.frames = []
-        self.audio_queue = Queue()
-        self.result_queue = Queue()
-        self.recording_thread = None
-        self.processing_thread = None
         
         # Initialize PyAudio
         self.p = pyaudio.PyAudio()
-        self.input_device_index = self._find_input_device()
+        self.input_device_index = self._find_input_device(device_index)
         
         # Schedule display timing
         self.last_schedule_display = 0
         self.schedule_showing = False
         self.schedule_show_start = 0
 
-    def _find_input_device(self):
-        """Find and return the selected input device index"""
-        devices = []
-        info = self.p.get_host_api_info_by_index(0)
+    def _find_input_device(self, device_index=None):
+        """Find the audio input device to use."""
+        p = pyaudio.PyAudio()
+        
+        if device_index is not None:
+            try:
+                device_info = p.get_device_info_by_index(device_index)
+                if device_info['maxInputChannels'] > 0:
+                    # Set audio parameters based on the device
+                    self.CHANNELS = min(device_info['maxInputChannels'], 1)  # Use mono, or whatever device supports
+                    self.RATE = int(device_info['defaultSampleRate'])
+                    print(f"Using device: {device_info['name']}")
+                    print(f"Sample rate: {self.RATE}")
+                    print(f"Channels: {self.CHANNELS}")
+                    return device_index
+                else:
+                    print(f"Error: Device {device_index} has no input channels")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"Error: Invalid device index {device_index}: {str(e)}")
+                sys.exit(1)
+        
+        # List all input devices
+        input_devices = []  # Store actual input devices with their original indices
+        info = p.get_host_api_info_by_index(0)
         numdevices = info.get('deviceCount')
         
         # Get default input device
         try:
-            default_device = self.p.get_default_input_device_info()
+            default_device = p.get_default_input_device_info()
             default_index = default_device['index']
             self.logger.info(f"Default input device: {default_device['name']} (index: {default_index})")
         except IOError:
             default_index = None
             self.logger.warning("No default input device found")
         
-        # List all input devices
-        input_devices = []  # Store actual input devices with their original indices
         for i in range(numdevices):
             try:
-                device_info = self.p.get_device_info_by_index(i)
+                device_info = p.get_device_info_by_index(i)
                 if device_info.get('maxInputChannels') > 0:
                     input_devices.append((i, device_info))  # Keep original index
                     if self.debug_mode:
