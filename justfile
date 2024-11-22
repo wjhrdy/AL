@@ -203,40 +203,11 @@ enable-autostart:
         echo "Stored device selection in .env file"
     fi
     
-    # Ensure pulseaudio is installed
-    if ! command -v pulseaudio >/dev/null; then
-        sudo apt-get update
-        sudo apt-get install -y pulseaudio pulseaudio-utils
-    fi
-    
-    # Create user PulseAudio config
-    mkdir -p ~/.config/pulse
-    tee ~/.config/pulse/client.conf > /dev/null << EOL
-    autospawn = yes
-    daemon-binary = /usr/bin/pulseaudio
-    enable-shm = yes
-    EOL
-    
-    # Create user PulseAudio daemon config
-    tee ~/.config/pulse/daemon.conf > /dev/null << EOL
-    exit-idle-time = -1
-    flat-volumes = no
-    EOL
-    
     # Create startup script
     mkdir -p ${CURRENT_PATH}/scripts
     tee ${CURRENT_PATH}/scripts/start.sh > /dev/null << EOL
-    #!/bin/bash
-    # Kill any existing PulseAudio
-    pulseaudio --kill || true
-    sleep 1
-
-    # Start PulseAudio as user
-    pulseaudio --start --log-target=journal || true
-    sleep 2
-
-    # Start the main application
-    exec ${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
+        #!/bin/bash
+        exec ${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
     EOL
     
     chmod +x ${CURRENT_PATH}/scripts/start.sh
@@ -248,7 +219,7 @@ enable-autostart:
     tee ~/.config/systemd/user/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=graphical-session.target pulseaudio.service
+    After=graphical-session.target
     PartOf=graphical-session.target
 
     [Service]
@@ -258,7 +229,6 @@ enable-autostart:
     Environment=DISPLAY=:0
     Environment=SDL_VIDEODRIVER=x11
 
-    # Use the startup script
     ExecStart=${CURRENT_PATH}/scripts/start.sh
 
     Restart=always
@@ -273,10 +243,6 @@ enable-autostart:
     
     # Reload user systemd
     systemctl --user daemon-reload
-    
-    # Kill any running PulseAudio instances
-    pulseaudio --kill || true
-    sleep 2
     
     echo "Enabling and starting service..."
     systemctl --user enable al.service
