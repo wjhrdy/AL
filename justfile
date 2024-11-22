@@ -189,7 +189,7 @@ enable-autostart:
     CURRENT_PATH=$(pwd)
     
     # Add current user to necessary groups
-    for GROUP in audio video pulse pulse-access; do
+    for GROUP in audio video; do
         if ! groups | grep -q $GROUP; then
             sudo usermod -a -G $GROUP $USER
             echo "Added $USER to $GROUP group"
@@ -227,11 +227,6 @@ enable-autostart:
     mkdir -p ${CURRENT_PATH}/scripts
     tee ${CURRENT_PATH}/scripts/start.sh > /dev/null << EOL
     #!/bin/bash
-    # Setup runtime directory
-    mkdir -p /run/user/$(id -u)/pulse || true
-    chown -R ${USER}:${USER} /run/user/$(id -u) || true
-    chmod 700 /run/user/$(id -u) || true
-
     # Kill any existing PulseAudio
     pulseaudio --kill || true
     sleep 1
@@ -246,24 +241,21 @@ enable-autostart:
     
     chmod +x ${CURRENT_PATH}/scripts/start.sh
     
-    echo "Creating systemd service file..."
-    sudo tee /etc/systemd/system/al.service > /dev/null << EOL
+    # Create user systemd directory
+    mkdir -p ~/.config/systemd/user
+    
+    # Create user service file
+    tee ~/.config/systemd/user/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=network.target sound.target graphical.target
-    StartLimitIntervalSec=0
+    After=graphical-session.target pulseaudio.service
+    PartOf=graphical-session.target
 
     [Service]
     Type=simple
-    User=${USER}
-    Group=audio
     WorkingDirectory=${CURRENT_PATH}
     EnvironmentFile=${CURRENT_PATH}/.env
-    Environment=HOME=/home/${USER}
-    Environment=XDG_RUNTIME_DIR=/run/user/$(id -u)
-    Environment=PULSE_RUNTIME_PATH=/run/user/$(id -u)/pulse
     Environment=DISPLAY=:0
-    Environment=XAUTHORITY=/home/${USER}/.Xauthority
     Environment=SDL_VIDEODRIVER=x11
 
     # Use the startup script
@@ -271,58 +263,26 @@ enable-autostart:
 
     Restart=always
     RestartSec=10
-    StandardOutput=journal
-    StandardError=journal
-    MemoryHigh=768M
-    MemoryMax=1G
-    MemorySwapMax=512M
 
     [Install]
-    WantedBy=graphical.target
+    WantedBy=graphical-session.target
     EOL
     
-    echo "Setting permissions..."
-    sudo chmod 644 /etc/systemd/system/al.service
+    # Enable lingering for the user (allows user services to run without login)
+    sudo loginctl enable-linger ${USER}
     
-    # Configure PulseAudio system mode
-    sudo mkdir -p /etc/pulse
-    sudo tee /etc/pulse/system.pa > /dev/null << EOL
-    #!/usr/bin/pulseaudio -nF
-    load-module module-device-restore
-    load-module module-stream-restore
-    load-module module-card-restore
-    load-module module-udev-detect
-    load-module module-native-protocol-unix auth-anonymous=1
-    load-module module-default-device-restore
-    load-module module-rescue-streams
-    load-module module-always-sink
-    load-module module-intended-roles
-    load-module module-suspend-on-idle
-    load-module module-position-event-sounds
-    load-module module-role-cork
-    load-module module-filter-heuristics
-    load-module module-filter-apply
-    load-module module-switch-on-port-available
-    load-module module-native-protocol-tcp auth-anonymous=1
-    EOL
-    
-    # Create runtime directory with proper permissions
-    sudo mkdir -p /run/user/$(id -u)
-    sudo chown -R ${USER}:${USER} /run/user/$(id -u)
-    sudo chmod 700 /run/user/$(id -u)
+    # Reload user systemd
+    systemctl --user daemon-reload
     
     # Kill any running PulseAudio instances
     pulseaudio --kill || true
     sleep 2
     
-    # Reload systemd
-    sudo systemctl daemon-reload
-    
     echo "Enabling and starting service..."
-    sudo systemctl enable al.service
-    sudo systemctl start al.service
-    echo "Autostart enabled! Check status with: sudo systemctl status al.service"
-    echo "View logs with: journalctl -u al.service -f"
+    systemctl --user enable al.service
+    systemctl --user start al.service
+    echo "Autostart enabled! Check status with: systemctl --user status al.service"
+    echo "View logs with: journalctl --user -u al.service -f"
 
 # Disable autostart on Raspberry Pi
 disable-autostart:
@@ -332,7 +292,7 @@ disable-autostart:
         echo "Autostart is only supported on Raspberry Pi"
         exit 1
     fi
-    sudo systemctl disable al.service
-    sudo systemctl stop al.service
-    sudo rm /etc/systemd/system/al.service
+    systemctl --user disable al.service
+    systemctl --user stop al.service
+    rm -f ~/.config/systemd/user/al.service
     echo "Autostart disabled!"
