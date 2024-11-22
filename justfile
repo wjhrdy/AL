@@ -189,7 +189,7 @@ enable-autostart:
     CURRENT_PATH=$(pwd)
     
     # Add current user to necessary groups
-    for GROUP in audio video; do
+    for GROUP in audio video pulse pulse-access; do
         if ! groups | grep -q $GROUP; then
             sudo usermod -a -G $GROUP $USER
             echo "Added $USER to $GROUP group"
@@ -223,6 +223,29 @@ enable-autostart:
     flat-volumes = no
     EOL
     
+    # Create startup script
+    mkdir -p ${CURRENT_PATH}/scripts
+    tee ${CURRENT_PATH}/scripts/start.sh > /dev/null << EOL
+    #!/bin/bash
+    # Setup runtime directory
+    mkdir -p /run/user/$(id -u)/pulse || true
+    chown -R ${USER}:${USER} /run/user/$(id -u) || true
+    chmod 700 /run/user/$(id -u) || true
+
+    # Kill any existing PulseAudio
+    pulseaudio --kill || true
+    sleep 1
+
+    # Start PulseAudio as user
+    pulseaudio --start --log-target=journal || true
+    sleep 2
+
+    # Start the main application
+    exec ${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
+    EOL
+    
+    chmod +x ${CURRENT_PATH}/scripts/start.sh
+    
     echo "Creating systemd service file..."
     sudo tee /etc/systemd/system/al.service > /dev/null << EOL
     [Unit]
@@ -243,25 +266,8 @@ enable-autostart:
     Environment=XAUTHORITY=/home/${USER}/.Xauthority
     Environment=SDL_VIDEODRIVER=x11
 
-    # Setup runtime directory
-    ExecStartPre=/bin/mkdir -p /run/user/$(id -u)/pulse
-    ExecStartPre=/bin/chown -R ${USER}:${USER} /run/user/$(id -u)
-    ExecStartPre=/bin/chmod 700 /run/user/$(id -u)
-
-    # Kill any existing PulseAudio
-    ExecStartPre=-/usr/bin/pulseaudio --kill
-
-    # Start PulseAudio in system mode
-    ExecStartPre=/usr/bin/pulseaudio --start --system --disallow-exit --disallow-module-loading --log-target=journal
-
-    # Wait for PulseAudio to be ready
-    ExecStartPre=/bin/sleep 3
-
-    # Main application
-    ExecStart=${CURRENT_PATH}/.venv/bin/python hello.py --device \${AL_DEVICE} --fullscreen
-
-    # Cleanup
-    ExecStopPost=-/usr/bin/pulseaudio --kill
+    # Use the startup script
+    ExecStart=${CURRENT_PATH}/scripts/start.sh
 
     Restart=always
     RestartSec=10
@@ -277,10 +283,6 @@ enable-autostart:
     
     echo "Setting permissions..."
     sudo chmod 644 /etc/systemd/system/al.service
-    
-    # Allow PulseAudio to run in system mode
-    sudo adduser ${USER} pulse-access || true
-    sudo adduser ${USER} audio || true
     
     # Configure PulseAudio system mode
     sudo mkdir -p /etc/pulse
@@ -303,6 +305,11 @@ enable-autostart:
     load-module module-switch-on-port-available
     load-module module-native-protocol-tcp auth-anonymous=1
     EOL
+    
+    # Create runtime directory with proper permissions
+    sudo mkdir -p /run/user/$(id -u)
+    sudo chown -R ${USER}:${USER} /run/user/$(id -u)
+    sudo chmod 700 /run/user/$(id -u)
     
     # Kill any running PulseAudio instances
     pulseaudio --kill || true
