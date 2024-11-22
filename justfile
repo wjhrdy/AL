@@ -35,8 +35,9 @@ install:
         sudo apt-get update
         # Install Python with specific version
         sudo apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-venv
-        # Install audio dependencies including those needed for PyAudio
-        sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc
+        # Install audio dependencies including those needed for PyAudio and JACK
+        sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc \
+            jackd2 libjack-jackd2-dev jack-tools qjackctl pulseaudio-module-jack
     else
         echo "Unsupported operating system: $OSTYPE"
         exit 1
