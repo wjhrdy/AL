@@ -102,6 +102,13 @@ class MusicIdentifier:
         self.schedule_showing = False
         self.schedule_show_start = 0
 
+        # Screensaver state
+        self.screensaver_pos = [100, 100]  # Initial position
+        self.screensaver_velocity = [2, 2]  # Movement speed and direction
+        self.screensaver_last_update = time.time()
+        self.screensaver_color = (255, 255, 255)  # Initial color
+        self.screensaver_color_direction = [1, 1, 1]  # Color change direction for RGB
+
     def _find_input_device(self, device_index=None):
         """Find the audio input device to use."""
         p = pyaudio.PyAudio()
@@ -210,7 +217,6 @@ class MusicIdentifier:
                 print("\nExiting...")
                 sys.exit(0)
 
-    @staticmethod
     def list_devices():
         """List all available input devices without starting the program"""
         p = pyaudio.PyAudio()
@@ -550,49 +556,54 @@ class MusicIdentifier:
         else:
             # If no song is playing or we're showing the schedule, show schedule information
             if self.schedule_showing or (not self.last_identified):
-                message = self._get_schedule_message()
                 if not self._is_within_operating_hours():
+                    # Get off-hours message from config
                     message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-                lines = message.split('\n')
-                
-                # Calculate dynamic font sizes based on screen height - adjusted for screen width
-                header_font_size = min(int(self.screen_height * 0.13), 100)  # Slightly smaller header
-                schedule_font_size = min(int(self.screen_height * 0.09), 72)  # Adjusted for width
-                
-                # Calculate dynamic spacing - adjusted for larger text
-                group_spacing = int(self.screen_height * 0.15)  # Spacing between day groups
-                hour_spacing = int(self.screen_height * 0.08)   # Tighter spacing for hours
-                header_spacing = int(self.screen_height * 0.18)  # Larger spacing after header
-                
-                # Calculate starting Y position (20% from top to accommodate larger text)
-                start_y = int(self.screen_height * 0.2)
-                
-                # Render each line
-                current_y = start_y
-                for i, line in enumerate(lines):
-                    if line.strip():  # Only render non-empty lines
-                        if i == 0:  # Header line
-                            font = pygame.font.Font(None, header_font_size)
-                            text_surface = self.render_text_with_outline(
-                                line, font, (255, 255, 255), (0, 0, 0), 4)  # Thicker outline
-                            current_y = start_y
-                        else:  # Schedule lines
-                            font = pygame.font.Font(None, schedule_font_size)
-                            text_surface = self.render_text_with_outline(
-                                line.strip(), font, (255, 255, 255), (0, 0, 0), 3)  # Thicker outline
-                            
-                            if i == 1:  # First line after header
-                                current_y += header_spacing
-                            # Use tighter spacing for hours (every even line after header)
-                            elif i % 2 == 0:
-                                current_y += hour_spacing
-                            else:
-                                # Add full group spacing before each day group
-                                current_y += group_spacing
-                            
-                        # Center the text horizontally
-                        text_rect = text_surface.get_rect(centerx=self.screen_width//2, centery=current_y)
-                        self.screen.blit(text_surface, text_rect)
+                    # Render screensaver
+                    text_surface = self._update_screensaver(message, font_size=48)
+                    self.screen.blit(text_surface, self.screensaver_pos)
+                else:
+                    message = self._get_schedule_message()
+                    lines = message.split('\n')
+                    
+                    # Calculate dynamic font sizes based on screen height - adjusted for screen width
+                    header_font_size = min(int(self.screen_height * 0.13), 100)  # Slightly smaller header
+                    schedule_font_size = min(int(self.screen_height * 0.09), 72)  # Adjusted for width
+                    
+                    # Calculate dynamic spacing - adjusted for larger text
+                    group_spacing = int(self.screen_height * 0.15)  # Spacing between day groups
+                    hour_spacing = int(self.screen_height * 0.08)   # Tighter spacing for hours
+                    header_spacing = int(self.screen_height * 0.18)  # Larger spacing after header
+                    
+                    # Calculate starting Y position (20% from top to accommodate larger text)
+                    start_y = int(self.screen_height * 0.2)
+                    
+                    # Render each line
+                    current_y = start_y
+                    for i, line in enumerate(lines):
+                        if line.strip():  # Only render non-empty lines
+                            if i == 0:  # Header line
+                                font = pygame.font.Font(None, header_font_size)
+                                text_surface = self.render_text_with_outline(
+                                    line, font, (255, 255, 255), (0, 0, 0), 4)  # Thicker outline
+                                current_y = start_y
+                            else:  # Schedule lines
+                                font = pygame.font.Font(None, schedule_font_size)
+                                text_surface = self.render_text_with_outline(
+                                    line.strip(), font, (255, 255, 255), (0, 0, 0), 3)  # Thicker outline
+                                
+                                if i == 1:  # First line after header
+                                    current_y += header_spacing
+                                # Use tighter spacing for hours (every even line after header)
+                                elif i % 2 == 0:
+                                    current_y += hour_spacing
+                                else:
+                                    # Add full group spacing before each day group
+                                    current_y += group_spacing
+                                
+                            # Center the text horizontally
+                            text_rect = text_surface.get_rect(centerx=self.screen_width//2, centery=current_y)
+                            self.screen.blit(text_surface, text_rect)
 
         # Draw notification on top if active
         self.draw_notification()
@@ -1029,6 +1040,72 @@ class MusicIdentifier:
                 elif event.key == pygame.K_ESCAPE and self.is_fullscreen:
                     self.toggle_fullscreen()
         return True
+
+    def _update_screensaver(self, text, font_size=36):
+        """Update and render the screensaver text with wrapping and bouncing movement."""
+        current_time = time.time()
+        dt = current_time - self.screensaver_last_update
+        self.screensaver_last_update = current_time
+
+        # Update position
+        self.screensaver_pos[0] += self.screensaver_velocity[0]
+        self.screensaver_pos[1] += self.screensaver_velocity[1]
+
+        # Update color (smooth color cycling)
+        for i in range(3):
+            color_val = self.screensaver_color[i] + self.screensaver_color_direction[i]
+            if color_val >= 255 or color_val <= 100:  # Keep colors bright enough
+                self.screensaver_color_direction[i] *= -1
+                color_val = max(100, min(255, color_val))
+            self.screensaver_color = tuple(
+                self.screensaver_color[j] + self.screensaver_color_direction[j]
+                if j == i else self.screensaver_color[j]
+                for j in range(3)
+            )
+
+        # Create font
+        font = pygame.font.Font(None, font_size)
+        
+        # Word wrap the text
+        words = text.split()
+        lines = []
+        current_line = []
+        max_width = self.screen_width * 0.8  # Use 80% of screen width
+
+        for word in words:
+            test_line = ' '.join(current_line + [word])
+            test_surface = font.render(test_line, True, self.screensaver_color)
+            if test_surface.get_width() <= max_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        # Render all lines
+        text_surfaces = [font.render(line, True, self.screensaver_color) for line in lines]
+        total_height = sum(surface.get_height() for surface in text_surfaces)
+        max_text_width = max(surface.get_width() for surface in text_surfaces)
+
+        # Create a surface containing all lines
+        text_surface = pygame.Surface((max_text_width, total_height), pygame.SRCALPHA)
+        current_y = 0
+        for surface in text_surfaces:
+            text_surface.blit(surface, ((max_text_width - surface.get_width()) // 2, current_y))
+            current_y += surface.get_height()
+
+        # Check bounds and bounce
+        if self.screensaver_pos[0] <= 0 or self.screensaver_pos[0] + max_text_width >= self.screen_width:
+            self.screensaver_velocity[0] *= -1
+            self.screensaver_pos[0] = max(0, min(self.screensaver_pos[0], self.screen_width - max_text_width))
+        
+        if self.screensaver_pos[1] <= 0 or self.screensaver_pos[1] + total_height >= self.screen_height:
+            self.screensaver_velocity[1] *= -1
+            self.screensaver_pos[1] = max(0, min(self.screensaver_pos[1], self.screen_height - total_height))
+
+        return text_surface
 
 async def main():
     import argparse
