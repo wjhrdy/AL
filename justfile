@@ -223,7 +223,7 @@ enable-autostart:
 
     [Install]
     WantedBy=multi-user.target
-EOL
+    EOL
     
     echo "Setting permissions..."
     sudo chmod 644 /etc/systemd/system/al.service
