@@ -976,8 +976,6 @@ class MusicIdentifier:
                 remote_config = await self._fetch_remote_config()
                 if remote_config:
                     self.logger.debug(f"Received remote config: {remote_config}")
-                    # Keep remote settings from local config
-                    remote_config['remote'] = self.config.get('remote', {})
                     
                     with self.config_lock:
                         # Deep compare the configs
