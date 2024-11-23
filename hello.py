@@ -279,9 +279,29 @@ class MusicIdentifier:
         """Save configuration to file."""
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.yaml')
         try:
+            # Create a backup of the old config
+            if os.path.exists(config_path):
+                backup_path = config_path + '.bak'
+                try:
+                    import shutil
+                    shutil.copy2(config_path, backup_path)
+                except Exception as e:
+                    self.logger.warning(f"Failed to create config backup: {e}")
+
+            # Write the new config with proper permissions
             with open(config_path, 'w') as f:
                 yaml.dump(config, f, default_flow_style=False)
+            
+            # Set file permissions to be readable and writable
+            try:
+                os.chmod(config_path, 0o666)
+            except Exception as e:
+                self.logger.warning(f"Failed to set config file permissions: {e}")
+
             self.logger.debug("Config file updated successfully")
+            
+            # Reload the config immediately
+            self.config = self._load_config()
             return True
         except Exception as e:
             self.logger.error(f"Error saving config: {e}")
@@ -707,17 +727,16 @@ class MusicIdentifier:
                     remote_config['remote'] = self.config.get('remote', {})
                     
                     with self.config_lock:
-                        if remote_config != self.config:
+                        # Deep compare the configs
+                        if yaml.dump(remote_config, sort_keys=True) != yaml.dump(self.config, sort_keys=True):
                             self.logger.debug("Remote config differs from local config, updating...")
-                            self.config = remote_config
-                            self.last_config_update = time.time()
-                            # Save updated config to file
+                            # Save updated config to file first
                             if self._save_config(remote_config):
                                 self.logger.info("Updated config file from remote source")
                                 self.show_notification("Config Updated", "Successfully updated local configuration file")
                             else:
                                 self.logger.warning("Failed to save updated config to file")
-                                self.show_notification("Config Update Warning", "Remote config updated but failed to save locally")
+                                self.show_notification("Config Update Warning", "Failed to save remote config locally")
                         else:
                             self.logger.debug("Remote config matches local config, no update needed")
                 else:
