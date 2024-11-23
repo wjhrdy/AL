@@ -94,6 +94,7 @@ class MusicIdentifier:
         self.fade_duration = 1.0  # Fade out over 1 second
         self.show_duration = 5.0  # Show title for 5 seconds
         self.current_background = None
+        self.permanent_schedule = False  # New flag for permanent schedule display
         
         # Audio parameters
         self.FORMAT = pyaudio.paFloat32  # Changed from paInt16 to paFloat32
@@ -485,15 +486,24 @@ class MusicIdentifier:
         schedule_duration = self.config.get('display', {}).get('schedule_duration', 10)  # Default 10 seconds
         current_time = time.time()
 
-        # Check if it's time to show the schedule
-        if not self.schedule_showing and current_time - self.last_schedule_display >= schedule_interval:
+        # Check if we should enable permanent schedule display (10 minutes without song change)
+        if self.last_song_time and current_time - self.last_song_time >= 600:  # 600 seconds = 10 minutes
+            self.permanent_schedule = True
             self.schedule_showing = True
-            self.schedule_show_start = current_time
-            self.last_schedule_display = current_time
+        # Reset permanent schedule when a new song is detected
+        elif self.last_song_time and current_time - self.last_song_time < 600:
+            self.permanent_schedule = False
 
-        # Check if we should stop showing the schedule
-        if self.schedule_showing and current_time - self.schedule_show_start >= schedule_duration:
-            self.schedule_showing = False
+        # Check if it's time to show the schedule (only if not permanent)
+        if not self.permanent_schedule:
+            if not self.schedule_showing and current_time - self.last_schedule_display >= schedule_interval:
+                self.schedule_showing = True
+                self.schedule_show_start = current_time
+                self.last_schedule_display = current_time
+
+            # Check if we should stop showing the schedule
+            if self.schedule_showing and current_time - self.schedule_show_start >= schedule_duration:
+                self.schedule_showing = False
 
         # Draw the current background if it exists and we're not showing the schedule
         if self.current_background is not None and not self.schedule_showing:
