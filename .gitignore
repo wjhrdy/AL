@@ -164,3 +164,6 @@ debug_output/
 
 # Application specific
 config.yaml
+config.yaml.bak
+
+cache/

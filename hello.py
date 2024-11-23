@@ -1,6 +1,7 @@
 import pyaudio
 import numpy as np
-from shazamio import Shazam
+from shazamio import Shazam, Serialize, HTTPClient
+from aiohttp_retry import ExponentialRetry
 import asyncio
 import pygame
 import requests
@@ -9,13 +10,13 @@ import time
 import warnings
 import sys
 import logging
-from pydub import AudioSegment
-import threading
-from queue import Queue, Empty
-import yaml
 from datetime import datetime, time as dt_time
 import os
 import aiohttp
+import hashlib
+import yaml
+import threading
+from pydub import AudioSegment
 
 # Suppress urllib3 warnings
 warnings.filterwarnings('ignore', category=Warning)
@@ -53,8 +54,16 @@ class MusicIdentifier:
             self.debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug_output')
             os.makedirs(self.debug_dir, exist_ok=True)
         
-        # Initialize Shazam
-        self.shazam = Shazam()
+        # Initialize Shazam with retry options
+        self.shazam = Shazam(
+            http_client=HTTPClient(
+                retry_options=ExponentialRetry(
+                    attempts=12,
+                    max_timeout=204.8,
+                    statuses={500, 502, 503, 504, 429}
+                ),
+            ),
+        )
         
         # Initialize PyGame display
         pygame.init()
@@ -87,11 +96,10 @@ class MusicIdentifier:
         self.current_background = None
         
         # Audio parameters
-        self.FORMAT = pyaudio.paFloat32
+        self.FORMAT = pyaudio.paFloat32  # Changed from paInt16 to paFloat32
         self.CHANNELS = 1  # Will be updated when device is selected
         self.RATE = 16000  # Will be updated when device is selected
         self.CHUNK = 1024
-        self.RECORD_SECONDS = 5
         
         # Initialize PyAudio
         self.p = pyaudio.PyAudio()
@@ -630,45 +638,290 @@ class MusicIdentifier:
         
         pygame.display.flip()
 
-    def display_album_art(self, track):
-        """Display album art on screen."""
+    async def display_album_art(self, track):
+        """Display album art on screen with improved error handling and caching."""
+        if not track or 'images' not in track:
+            self.logger.warning("No album art found in track data")
+            self.current_background = None
+            return
+
         try:
-            artwork_url = track.get('images', {}).get('coverart')
-            if not artwork_url:
-                if self.debug_mode:
-                    self.logger.debug("No album art URL found")
-                return False
+            # Get the highest quality image available
+            image_url = None
+            if 'coverarthq' in track['images']:
+                image_url = track['images']['coverarthq']
+            elif 'coverart' in track['images']:
+                image_url = track['images']['coverart']
             
-            # Download and display the album art
-            response = requests.get(artwork_url)
-            image = pygame.image.load(BytesIO(response.content))
+            if not image_url:
+                self.logger.warning("No suitable album art URL found")
+                self.current_background = None
+                return
+
+            # Implement caching to avoid re-downloading the same image
+            cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache')
+            os.makedirs(cache_dir, exist_ok=True)
             
-            # Scale and center image
-            scale = min(self.screen_width / image.get_width(), 
-                      self.screen_height / image.get_height())
-            new_size = (int(image.get_width() * scale), 
-                      int(image.get_height() * scale))
-            image = pygame.transform.scale(image, new_size)
+            # Create a cache key from the URL
+            cache_key = hashlib.md5(image_url.encode()).hexdigest()
+            cache_path = os.path.join(cache_dir, f"{cache_key}.jpg")
+
+            # Check if image is already cached
+            if os.path.exists(cache_path):
+                self.logger.debug("Loading album art from cache")
+                image_data = open(cache_path, 'rb').read()
+            else:
+                # Download with timeout and retries
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(image_url, timeout=10) as response:
+                        if response.status == 200:
+                            image_data = await response.read()
+                            # Cache the downloaded image
+                            with open(cache_path, 'wb') as f:
+                                f.write(image_data)
+                        else:
+                            raise Exception(f"Failed to download image: {response.status}")
+
+            # Load image with Pygame
+            image_stream = BytesIO(image_data)
+            image = pygame.image.load(image_stream)
             
-            # Create a new surface for the background
-            self.current_background = pygame.Surface((self.screen_width, self.screen_height))
-            self.current_background.fill((0, 0, 0))
-            
-            # Center the image
-            image_x = (self.screen_width - new_size[0]) // 2
-            image_y = (self.screen_height - new_size[1]) // 2
-            self.current_background.blit(image, (image_x, image_y))
-            
-            # Copy background to screen
-            self.screen.blit(self.current_background, (0, 0))
-            pygame.display.flip()
-            return True
-            
+            # Convert to RGB mode if necessary (handles PNG transparency)
+            if image.get_alpha():
+                image = image.convert_alpha()
+            else:
+                image = image.convert()
+
+            self.current_background = image
+            self.logger.debug("Successfully loaded and displayed album art")
+
         except Exception as e:
             self.logger.error(f"Error displaying album art: {e}")
             if self.debug_mode:
-                self.logger.debug(f"Track data: {track}")
-            return False
+                import traceback
+                self.logger.debug(traceback.format_exc())
+            self.current_background = None
+
+    async def run(self):
+        """Main application loop with improved music detection."""
+        try:
+            # Initialize Pygame display
+            pygame.display.set_caption("Music Identifier")
+            if self.is_fullscreen:
+                self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+            else:
+                self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
+            self.font = pygame.font.Font(None, 36)
+
+            # Initialize audio stream with error handling
+            stream = self.p.open(
+                format=self.FORMAT,
+                channels=self.CHANNELS,
+                rate=self.RATE,
+                input=True,
+                input_device_index=self.input_device_index,
+                frames_per_buffer=self.CHUNK
+            )
+            
+            # Create a buffer for audio data
+            buffer = []
+            buffer_duration = 0
+            target_duration = 5  # seconds of audio to collect
+
+            while True:
+                # Handle Pygame events
+                self.handle_events()
+                
+                if not self._is_within_operating_hours():
+                    await asyncio.sleep(1)
+                    self.draw_window()
+                    pygame.display.flip()
+                    continue
+
+                # Read audio data
+                try:
+                    data = stream.read(self.CHUNK, exception_on_overflow=False)
+                    # Convert data to numpy array directly
+                    audio_chunk = np.frombuffer(data, dtype=np.float32)
+                    buffer.append(audio_chunk)
+                    buffer_duration += self.CHUNK / self.RATE
+
+                    # Once we have enough audio data
+                    if buffer_duration >= target_duration:
+                        # Concatenate all chunks
+                        audio_array = np.concatenate(buffer)
+                        # Convert to int16
+                        audio_int16 = (audio_array * 32767).astype(np.int16)
+                        # Create AudioSegment
+                        audio_segment = AudioSegment(
+                            audio_int16.tobytes(),
+                            frame_rate=self.RATE,
+                            sample_width=2,  # 16-bit audio
+                            channels=self.CHANNELS
+                        )
+                        
+                        # Export to WAV format in memory
+                        wav_buffer = audio_segment.export(format="wav")
+                        audio_data = wav_buffer.read()
+                        wav_buffer.close()
+
+                        # Clear the buffer
+                        buffer.clear()
+                        buffer_duration = 0
+
+                        try:
+                            # Recognize song using the WAV data
+                            result = await self.shazam.recognize(audio_data)
+                            
+                            if result and 'track' in result:
+                                # Create new song info from the raw result first
+                                current_song = {
+                                    'title': result['track'].get('title', 'Unknown Title'),
+                                    'artist': result['track'].get('subtitle', 'Unknown Artist')
+                                }
+
+                                # Check if this is a new song
+                                if (not self.last_identified or 
+                                    current_song['title'] != self.last_identified['title'] or
+                                    current_song['artist'] != self.last_identified['artist']):
+                                    
+                                    self.last_identified = current_song
+                                    self.last_song_time = time.time()
+                                    
+                                    # Log the identification
+                                    self.logger.info(f"Identified: {current_song['title']} by {current_song['artist']}")
+                                    
+                                    # Display album art
+                                    await self.display_album_art(result['track'])
+                        except Exception as e:
+                            self.logger.error(f"Error in song recognition: {e}")
+                            if self.debug_mode:
+                                import traceback
+                                self.logger.debug(traceback.format_exc())
+
+                except IOError as e:
+                    self.logger.error(f"Audio stream error: {e}")
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Update display
+                self.draw_window()
+                pygame.display.flip()
+
+                # Small sleep to prevent high CPU usage
+                await asyncio.sleep(0.01)
+
+        except Exception as e:
+            self.logger.error(f"Fatal error in run loop: {e}")
+            if self.debug_mode:
+                import traceback
+                self.logger.debug(traceback.format_exc())
+        finally:
+            if 'stream' in locals():
+                stream.stop_stream()
+                stream.close()
+            pygame.quit()
+
+    def show_notification(self, title, message, duration=3):
+        """Show a notification message on the screen."""
+        self.notification = {
+            'title': title,
+            'message': message,
+            'start_time': time.time(),
+            'duration': duration
+        }
+
+    def draw_notification(self):
+        """Draw the current notification if active."""
+        if hasattr(self, 'notification'):
+            current_time = time.time()
+            if current_time - self.notification['start_time'] < self.notification['duration']:
+                # Draw semi-transparent background
+                notification_surface = pygame.Surface((self.screen_width, 80))
+                notification_surface.set_alpha(200)
+                notification_surface.fill((0, 0, 0))
+                self.screen.blit(notification_surface, (0, 0))
+
+                # Draw title and message
+                title_font = pygame.font.Font(None, 36)
+                message_font = pygame.font.Font(None, 24)
+
+                title_text = title_font.render(self.notification['title'], True, (255, 255, 255))
+                message_text = message_font.render(self.notification['message'], True, (200, 200, 200))
+
+                title_rect = title_text.get_rect(centerx=self.screen_width//2, top=10)
+                message_rect = message_text.get_rect(centerx=self.screen_width//2, top=45)
+
+                self.screen.blit(title_text, title_rect)
+                self.screen.blit(message_text, message_rect)
+            else:
+                delattr(self, 'notification')
+
+    def _update_screensaver(self, text, font_size=36):
+        """Update and render the screensaver text with wrapping and bouncing movement."""
+        current_time = time.time()
+        dt = current_time - self.screensaver_last_update
+        self.screensaver_last_update = current_time
+
+        # Update position
+        self.screensaver_pos[0] += self.screensaver_velocity[0]
+        self.screensaver_pos[1] += self.screensaver_velocity[1]
+
+        # Update color (smooth color cycling)
+        for i in range(3):
+            color_val = self.screensaver_color[i] + self.screensaver_color_direction[i]
+            if color_val >= 255 or color_val <= 100:  # Keep colors bright enough
+                self.screensaver_color_direction[i] *= -1
+                color_val = max(100, min(255, color_val))
+            self.screensaver_color = tuple(
+                self.screensaver_color[j] + self.screensaver_color_direction[j]
+                if j == i else self.screensaver_color[j]
+                for j in range(3)
+            )
+
+        # Create font
+        font = pygame.font.Font(None, font_size)
+        
+        # Word wrap the text
+        words = text.split()
+        lines = []
+        current_line = []
+        max_width = self.screen_width * 0.8  # Use 80% of screen width
+
+        for word in words:
+            test_line = ' '.join(current_line + [word])
+            test_surface = font.render(test_line, True, self.screensaver_color)
+            if test_surface.get_width() <= max_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+        if current_line:
+            lines.append(' '.join(current_line))
+
+        # Render all lines
+        text_surfaces = [font.render(line, True, self.screensaver_color) for line in lines]
+        total_height = sum(surface.get_height() for surface in text_surfaces)
+        max_text_width = max(surface.get_width() for surface in text_surfaces)
+
+        # Create a surface containing all lines
+        text_surface = pygame.Surface((max_text_width, total_height), pygame.SRCALPHA)
+        current_y = 0
+        for surface in text_surfaces:
+            text_surface.blit(surface, ((max_text_width - surface.get_width()) // 2, current_y))
+            current_y += surface.get_height()
+
+        # Check bounds and bounce
+        if self.screensaver_pos[0] <= 0 or self.screensaver_pos[0] + max_text_width >= self.screen_width:
+            self.screensaver_velocity[0] *= -1
+            self.screensaver_pos[0] = max(0, min(self.screensaver_pos[0], self.screen_width - max_text_width))
+        
+        if self.screensaver_pos[1] <= 0 or self.screensaver_pos[1] + total_height >= self.screen_height:
+            self.screensaver_velocity[1] *= -1
+            self.screensaver_pos[1] = max(0, min(self.screensaver_pos[1], self.screen_height - total_height))
+
+        return text_surface
 
     async def _fetch_remote_config(self):
         """Fetch remote config from GitHub Gist."""
@@ -753,278 +1006,6 @@ class MusicIdentifier:
                     self.logger.debug(f"Full traceback: {traceback.format_exc()}")
                 await asyncio.sleep(60)  # Wait a minute before retrying on error
 
-    def show_notification(self, title, message, duration=3):
-        """Show a notification message on the screen."""
-        self.notification = {
-            'title': title,
-            'message': message,
-            'start_time': time.time(),
-            'duration': duration
-        }
-
-    def draw_notification(self):
-        """Draw the current notification if active."""
-        if hasattr(self, 'notification'):
-            current_time = time.time()
-            if current_time - self.notification['start_time'] < self.notification['duration']:
-                # Draw semi-transparent background
-                notification_surface = pygame.Surface((self.screen_width, 80))
-                notification_surface.set_alpha(200)
-                notification_surface.fill((0, 0, 0))
-                self.screen.blit(notification_surface, (0, 0))
-
-                # Draw title and message
-                title_font = pygame.font.Font(None, 36)
-                message_font = pygame.font.Font(None, 24)
-
-                title_text = title_font.render(self.notification['title'], True, (255, 255, 255))
-                message_text = message_font.render(self.notification['message'], True, (200, 200, 200))
-
-                title_rect = title_text.get_rect(centerx=self.screen_width//2, top=10)
-                message_rect = message_text.get_rect(centerx=self.screen_width//2, top=45)
-
-                self.screen.blit(title_text, title_rect)
-                self.screen.blit(message_text, message_rect)
-            else:
-                delattr(self, 'notification')
-
-    def process_audio_and_recognize(self, audio_data):
-        """Process audio and recognize song in a separate thread."""
-        try:
-            # Convert audio to int16
-            audio_array = np.frombuffer(b''.join(audio_data), dtype=np.float32)
-            audio_int16 = (audio_array * 32767).astype(np.int16)
-            
-            # Create AudioSegment
-            audio_segment = AudioSegment(
-                audio_int16.tobytes(), 
-                frame_rate=self.RATE,
-                sample_width=2,  # 16-bit audio
-                channels=self.CHANNELS
-            )
-            
-            # Store audio segment in debug mode
-            if self.debug_mode:
-                self.last_audio_segment = audio_segment
-            
-            # Export to WAV format in memory
-            buffer = audio_segment.export(format="wav")
-            audio_bytes = buffer.read()
-            buffer.close()  # Explicitly close the buffer
-
-            # Clean up memory
-            del audio_array
-            del audio_int16
-            
-            # Run song recognition
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                out = loop.run_until_complete(self.shazam.recognize(data=audio_bytes))
-                
-                if not out or not out.get('track'):
-                    if self.debug_mode:
-                        self.logger.debug("No song detected")
-                    self.result_queue.put(None)
-                    return
-
-                track = out['track']
-                
-                # Create new song info
-                new_song = {
-                    'title': track.get('title', 'Unknown Title'),
-                    'artist': track.get('subtitle', 'Unknown Artist'),
-                    'artwork_url': track.get('images', {}).get('coverart', None)
-                }
-                
-                # Put the result in the queue
-                self.result_queue.put((new_song, track, audio_segment if self.debug_mode else None))
-                
-            finally:
-                loop.close()
-                
-        except Exception as e:
-            self.logger.error(f"Error processing audio: {e}")
-            if self.debug_mode:
-                import traceback
-                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
-            self.result_queue.put(None)
-
-    def record_audio(self):
-        """Record audio in a separate thread."""
-        stream = None
-        try:
-            stream = self.p.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.RATE,
-                input=True,
-                input_device_index=self.input_device_index,
-                frames_per_buffer=self.CHUNK
-            )
-            
-            self.frames = []
-            start_time = time.time()
-            
-            while time.time() - start_time < self.RECORD_SECONDS and self.recording:
-                try:
-                    data = stream.read(self.CHUNK, exception_on_overflow=False)
-                    self.frames.append(data)
-                    time.sleep(0.001)  # Use time.sleep since this runs in a regular thread
-                except Exception as e:
-                    self.logger.error(f"Error recording audio: {e}")
-                    break
-        finally:
-            if stream:
-                try:
-                    stream.stop_stream()
-                    stream.close()
-                except Exception as e:
-                    self.logger.error(f"Error closing audio stream: {e}")
-        
-        # Start processing in a new thread if we have frames
-        if self.frames:
-            self.processing_thread = threading.Thread(
-                target=self.process_audio_and_recognize,
-                args=(self.frames.copy(),)  # Pass a copy of the frames
-            )
-            self.processing_thread.start()
-            self.frames = []  # Clear frames after starting processing
-        
-        self.recording = False  # Reset recording state
-
-    async def check_recognition_result(self):
-        """Check for song recognition results."""
-        try:
-            result = self.result_queue.get_nowait()
-            if result:
-                new_song, track, audio_segment = result
-                
-                # Check if it's a different song
-                is_new_song = (not isinstance(self.last_identified, dict) or
-                             self.last_identified.get('title') != new_song['title'] or
-                             self.last_identified.get('artist') != new_song['artist'])
-                
-                if is_new_song:
-                    # Store the new song info and update timestamp
-                    self.last_identified = new_song
-                    self.last_song_time = time.time()
-                    
-                    if self.debug_mode:
-                        self.logger.info(f"New song identified: {self.last_identified['title']} by {self.last_identified['artist']}")
-                        # Save debug audio file
-                        import os
-                        import re
-                        
-                        # Clean filename of invalid characters
-                        def clean_filename(s):
-                            return re.sub(r'[<>:"/\\|?*]', '_', s)
-                        
-                        filename_base = clean_filename(f"{self.last_identified['title']}_by_{self.last_identified['artist']}")
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        
-                        # Save audio
-                        audio_path = os.path.join(self.debug_dir, f"{filename_base}_{timestamp}.wav")
-                        audio_segment.export(audio_path, format="wav")
-                        self.logger.debug(f"Saved audio to: {audio_path}")
-                    
-                    # Display album art if available
-                    self.display_album_art(track)
-            
-            if self.processing_thread and not self.processing_thread.is_alive():
-                self.processing_thread = None
-                
-        except Empty:
-            pass
-
-    async def start_recording(self):
-        """Start recording audio in a separate thread."""
-        if self.recording:
-            return
-        
-        self.recording = True
-        self.recording_thread = threading.Thread(target=self.record_audio)
-        self.recording_thread.start()
-
-    async def run(self):
-        """Main application loop."""
-        try:
-            pygame.display.set_caption("Music Identifier")
-            # Set initial display mode based on fullscreen flag
-            if self.is_fullscreen:
-                self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
-            else:
-                self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
-            self.font = pygame.font.Font(None, 36)
-
-            last_record_time = 0
-            last_gc_time = time.time()
-            
-            while True:
-                # Force garbage collection periodically
-                current_time = time.time()
-                if current_time - last_gc_time > 60:  # Every minute
-                    import gc
-                    gc.collect()
-                    last_gc_time = current_time
-                
-                await asyncio.sleep(0.1)  # Prevent CPU overload
-                
-                if not self._is_within_operating_hours():
-                    self.handle_events()
-                    self.draw_window()
-                    pygame.display.flip()
-                    await asyncio.sleep(1)  # Longer sleep when inactive
-                    continue
-
-                self.handle_events()
-                
-                # Start new recording if needed
-                if not self.recording and not self.processing_thread:
-                    if current_time - last_record_time >= self.RECORD_SECONDS:
-                        await self.start_recording()
-                        last_record_time = current_time
-                
-                # Check if recording is complete
-                if self.recording and self.recording_thread and not self.recording_thread.is_alive():
-                    self.recording = False
-                    if self.frames:  # Only process if we have audio data
-                        self.processing_thread = threading.Thread(
-                            target=self.process_audio_and_recognize,
-                            args=(self.frames.copy(),)  # Pass a copy of the frames
-                        )
-                        self.processing_thread.start()
-                        self.frames = []  # Clear frames after starting processing
-                
-                await self.check_recognition_result()
-                self.draw_window()
-                
-                # Draw any active notifications
-                self.draw_notification()
-                pygame.display.flip()
-                
-                # Small delay to prevent high CPU usage
-                await asyncio.sleep(0.1)
-                
-        except KeyboardInterrupt:
-            self.logger.info("Received keyboard interrupt, shutting down...")
-            # Clean up resources
-            if hasattr(self, 'p') and self.p:
-                self.p.terminate()
-            if hasattr(self, 'stream') and self.stream:
-                self.stream.stop_stream()
-                self.stream.close()
-            if hasattr(self, 'config_update_task') and self.config_update_task:
-                self.config_update_task.cancel()
-            raise  # Re-raise to allow main() to handle final cleanup
-        except Exception as e:
-            self.logger.error(f"Error in main loop: {e}")
-            if self.debug_mode:
-                import traceback
-                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
-        finally:
-            pygame.quit()
-
     def toggle_fullscreen(self):
         """Toggle between fullscreen and windowed mode."""
         self.is_fullscreen = not self.is_fullscreen
@@ -1044,9 +1025,6 @@ class MusicIdentifier:
             if event.type == pygame.QUIT:
                 if hasattr(self, 'p') and self.p:
                     self.p.terminate()
-                if hasattr(self, 'stream') and self.stream:
-                    self.stream.stop_stream()
-                    self.stream.close()
                 if hasattr(self, 'config_update_task') and self.config_update_task:
                     self.config_update_task.cancel()
                 pygame.quit()
@@ -1059,72 +1037,6 @@ class MusicIdentifier:
                 elif event.key == pygame.K_ESCAPE and self.is_fullscreen:
                     self.toggle_fullscreen()
         return True
-
-    def _update_screensaver(self, text, font_size=36):
-        """Update and render the screensaver text with wrapping and bouncing movement."""
-        current_time = time.time()
-        dt = current_time - self.screensaver_last_update
-        self.screensaver_last_update = current_time
-
-        # Update position
-        self.screensaver_pos[0] += self.screensaver_velocity[0]
-        self.screensaver_pos[1] += self.screensaver_velocity[1]
-
-        # Update color (smooth color cycling)
-        for i in range(3):
-            color_val = self.screensaver_color[i] + self.screensaver_color_direction[i]
-            if color_val >= 255 or color_val <= 100:  # Keep colors bright enough
-                self.screensaver_color_direction[i] *= -1
-                color_val = max(100, min(255, color_val))
-            self.screensaver_color = tuple(
-                self.screensaver_color[j] + self.screensaver_color_direction[j]
-                if j == i else self.screensaver_color[j]
-                for j in range(3)
-            )
-
-        # Create font
-        font = pygame.font.Font(None, font_size)
-        
-        # Word wrap the text
-        words = text.split()
-        lines = []
-        current_line = []
-        max_width = self.screen_width * 0.8  # Use 80% of screen width
-
-        for word in words:
-            test_line = ' '.join(current_line + [word])
-            test_surface = font.render(test_line, True, self.screensaver_color)
-            if test_surface.get_width() <= max_width:
-                current_line.append(word)
-            else:
-                if current_line:
-                    lines.append(' '.join(current_line))
-                current_line = [word]
-        if current_line:
-            lines.append(' '.join(current_line))
-
-        # Render all lines
-        text_surfaces = [font.render(line, True, self.screensaver_color) for line in lines]
-        total_height = sum(surface.get_height() for surface in text_surfaces)
-        max_text_width = max(surface.get_width() for surface in text_surfaces)
-
-        # Create a surface containing all lines
-        text_surface = pygame.Surface((max_text_width, total_height), pygame.SRCALPHA)
-        current_y = 0
-        for surface in text_surfaces:
-            text_surface.blit(surface, ((max_text_width - surface.get_width()) // 2, current_y))
-            current_y += surface.get_height()
-
-        # Check bounds and bounce
-        if self.screensaver_pos[0] <= 0 or self.screensaver_pos[0] + max_text_width >= self.screen_width:
-            self.screensaver_velocity[0] *= -1
-            self.screensaver_pos[0] = max(0, min(self.screensaver_pos[0], self.screen_width - max_text_width))
-        
-        if self.screensaver_pos[1] <= 0 or self.screensaver_pos[1] + total_height >= self.screen_height:
-            self.screensaver_velocity[1] *= -1
-            self.screensaver_pos[1] = max(0, min(self.screensaver_pos[1], self.screen_height - total_height))
-
-        return text_surface
 
 async def main():
     import argparse
