@@ -598,13 +598,29 @@ class MusicIdentifier:
                     header_font_size = min(int(self.screen_height * 0.13), 100)  # Slightly smaller header
                     schedule_font_size = min(int(self.screen_height * 0.09), 72)  # Adjusted for width
                     
-                    # Calculate dynamic spacing - adjusted for larger text
-                    group_spacing = int(self.screen_height * 0.15)  # Spacing between day groups
-                    hour_spacing = int(self.screen_height * 0.08)   # Tighter spacing for hours
-                    header_spacing = int(self.screen_height * 0.18)  # Larger spacing after header
+                    # Get the number of schedule groups
+                    num_groups = 0
+                    if self.config and 'schedule' in self.config:
+                        # Count unique hour combinations
+                        hour_groups = set()
+                        for item in self.config['schedule']:
+                            hour_groups.add(f"{item['open']}-{item['close']}")
+                        num_groups = len(hour_groups)
                     
-                    # Calculate starting Y position (20% from top to accommodate larger text)
-                    start_y = int(self.screen_height * 0.2)
+                    # Adjust spacings based on number of groups
+                    if num_groups <= 3:
+                        group_spacing = int(self.screen_height * 0.15)  # Original spacing for 3 or fewer groups
+                        hour_spacing = int(self.screen_height * 0.08)
+                        header_spacing = int(self.screen_height * 0.18)
+                    else:
+                        # Reduce spacing proportionally when there are more groups
+                        scale_factor = min(1.0, 3 / num_groups)  # Scale down as groups increase
+                        group_spacing = int(self.screen_height * 0.15 * scale_factor)
+                        hour_spacing = int(self.screen_height * 0.08 * scale_factor)
+                        header_spacing = int(self.screen_height * 0.18 * scale_factor)
+                    
+                    # Calculate starting Y position (15% from top for more space when many groups)
+                    start_y = int(self.screen_height * 0.15)
                     
                     # Render each line
                     current_y = start_y
