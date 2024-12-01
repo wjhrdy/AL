@@ -145,13 +145,14 @@ run:
 debug:
     #!/usr/bin/env bash
     set -euo pipefail
-    .venv/bin/python hello.py --debug
+    .venv/bin/python hello.py --debug 
 
 # Run the application with always-open flag
 debug-open:
     #!/usr/bin/env bash
     set -euo pipefail
-    python hello.py --always-open
+    source .venv/bin/activate
+    .venv/bin/python hello.py --always-open
 
 # Clean up virtual environment and cache
 clean:
