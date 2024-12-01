@@ -22,9 +22,10 @@ from pydub import AudioSegment
 warnings.filterwarnings('ignore', category=Warning)
 
 class MusicIdentifier:
-    def __init__(self, debug_mode=False, device_index=None):
+    def __init__(self, debug_mode=False, device_index=None, always_open=False):
         self.debug_mode = debug_mode
         self.device_index = device_index
+        self.always_open = always_open
         self.start_time = time.time()
         
         # Set up logging
@@ -318,6 +319,9 @@ class MusicIdentifier:
 
     def _is_within_operating_hours(self):
         """Check if current time is within operating hours."""
+        if self.always_open:
+            return True
+            
         if not self.config or 'schedule' not in self.config:
             return True  # If no schedule is found, operate 24/7
             
@@ -346,62 +350,6 @@ class MusicIdentifier:
         except ValueError as e:
             self.logger.error(f"Error parsing schedule times: {e}")
             return False
-
-    def _get_schedule_message(self):
-        """Get a formatted message about the schedule and current status."""
-        if not self.config or 'schedule' not in self.config:
-            return "AL is running 24/7"
-
-        # Get display settings with defaults
-        display_config = self.config.get('display', {})
-        header = display_config.get('schedule_header', 'Operating Hours')
-        time_format = display_config.get('schedule_time_format', '{open} - {close}')
-        
-        # Format all scheduled days
-        schedule_text = f"{header}:\n"
-        
-        # Group days with same hours
-        hours_to_days = {}
-        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        day_indices = {day: i for i, day in enumerate(day_order)}
-        
-        for item in self.config['schedule']:
-            hours = time_format.format(open=item['open'], close=item['close'])
-            if hours not in hours_to_days:
-                hours_to_days[hours] = []
-            hours_to_days[hours].append(item['day'])
-        
-        # Process each group of hours
-        for hours, days in hours_to_days.items():
-            # Sort days according to day_order
-            days.sort(key=lambda x: day_indices[x])
-            
-            # Find consecutive day ranges
-            ranges = []
-            range_start = days[0]
-            prev_idx = day_indices[days[0]]
-            
-            for day in days[1:]:
-                curr_idx = day_indices[day]
-                if curr_idx != prev_idx + 1:
-                    # End of a range
-                    if range_start == days[days.index(day)-1]:
-                        ranges.append(range_start)
-                    else:
-                        ranges.append(f"{range_start}-{days[days.index(day)-1]}")
-                    range_start = day
-                prev_idx = curr_idx
-            
-            # Add the last range
-            if range_start == days[-1]:
-                ranges.append(range_start)
-            else:
-                ranges.append(f"{range_start}-{days[-1]}")
-            
-            # Add to schedule text with days and hours on separate lines
-            schedule_text += f"{', '.join(ranges)}\n{hours}\n"
-
-        return schedule_text
 
     def render_text_with_outline(self, text, font, color, outline_color=(0, 0, 0), outline_width=2):
         """Render text with an outline for better visibility."""
@@ -758,7 +706,7 @@ class MusicIdentifier:
                 # Handle Pygame events
                 self.handle_events()
                 
-                if not self._is_within_operating_hours():
+                if not self._is_within_operating_hours() and not self.always_open:
                     await asyncio.sleep(1)
                     self.draw_window()
                     pygame.display.flip()
@@ -1062,6 +1010,62 @@ class MusicIdentifier:
                     self.toggle_fullscreen()
         return True
 
+    def _get_schedule_message(self):
+        """Get a formatted message about the schedule and current status."""
+        if not self.config or 'schedule' not in self.config:
+            return "AL is running 24/7"
+
+        # Get display settings with defaults
+        display_config = self.config.get('display', {})
+        header = display_config.get('schedule_header', 'Operating Hours')
+        time_format = display_config.get('schedule_time_format', '{open} - {close}')
+        
+        # Format all scheduled days
+        schedule_text = f"{header}:\n"
+        
+        # Group days with same hours
+        hours_to_days = {}
+        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        day_indices = {day: i for i, day in enumerate(day_order)}
+        
+        for item in self.config['schedule']:
+            hours = time_format.format(open=item['open'], close=item['close'])
+            if hours not in hours_to_days:
+                hours_to_days[hours] = []
+            hours_to_days[hours].append(item['day'])
+        
+        # Process each group of hours
+        for hours, days in hours_to_days.items():
+            # Sort days according to day_order
+            days.sort(key=lambda x: day_indices[x])
+            
+            # Find consecutive day ranges
+            ranges = []
+            range_start = days[0]
+            prev_idx = day_indices[days[0]]
+            
+            for day in days[1:]:
+                curr_idx = day_indices[day]
+                if curr_idx != prev_idx + 1:
+                    # End of a range
+                    if range_start == days[days.index(day)-1]:
+                        ranges.append(range_start)
+                    else:
+                        ranges.append(f"{range_start}-{days[days.index(day)-1]}")
+                    range_start = day
+                prev_idx = curr_idx
+            
+            # Add the last range
+            if range_start == days[-1]:
+                ranges.append(range_start)
+            else:
+                ranges.append(f"{range_start}-{days[-1]}")
+            
+            # Add to schedule text with days and hours on separate lines
+            schedule_text += f"{', '.join(ranges)}\n{hours}\n"
+
+        return schedule_text
+
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description='Music Recognition App')
@@ -1069,6 +1073,7 @@ async def main():
     parser.add_argument('--list-devices', action='store_true', help='List available audio devices and exit')
     parser.add_argument('--device', type=int, help='Select input device by number')
     parser.add_argument('--fullscreen', action='store_true', help='Start in fullscreen mode')
+    parser.add_argument('--always-open', action='store_true', help='Always stay open')
     
     try:
         args = parser.parse_args()
@@ -1081,6 +1086,7 @@ async def main():
             list_devices = False
             device = None
             fullscreen = False
+            always_open = False
         args = Args()
     
     if args.list_devices:
@@ -1099,7 +1105,7 @@ async def main():
         except ValueError:
             print(f"Warning: Invalid AL_DEVICE value: {env_device}. Must be an integer.")
     
-    app = MusicIdentifier(debug_mode=args.debug, device_index=args.device)
+    app = MusicIdentifier(debug_mode=args.debug, device_index=args.device, always_open=args.always_open)
     if args.fullscreen:
         app.is_fullscreen = True
     await app.run()
