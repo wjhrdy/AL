@@ -139,15 +139,20 @@ select-device:
 run: 
     #!/usr/bin/env bash
     set -euo pipefail
-    DEVICE=$(just select-device) || exit 1
     .venv/bin/python hello.py --device "$DEVICE"
 
 # Run the application in debug mode
 debug:
     #!/usr/bin/env bash
     set -euo pipefail
-    DEVICE=$(just select-device) || exit 1
     .venv/bin/python hello.py --debug --device "$DEVICE"
+
+# Run the application with always-open flag
+debug-open:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source .venv/bin/activate
+    python hello.py --device $DEVICE --always-open
 
 # Clean up virtual environment and cache
 clean:
