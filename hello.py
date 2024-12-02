@@ -746,6 +746,17 @@ class MusicIdentifier:
                         # Concatenate all chunks
                         audio_array = np.concatenate(buffer)
                         
+                        # Debug audio statistics
+                        if self.debug_mode:
+                            self.logger.debug(f"Audio stats - Min: {audio_array.min()}, Max: {audio_array.max()}, Mean: {audio_array.mean():.2f}")
+                            self.logger.debug(f"Sample rate: {self.RATE}, Channels: {self.CHANNELS}, Format: {self.FORMAT}")
+                            # Check for potential clipping
+                            if abs(audio_array.max()) >= 32767 or abs(audio_array.min()) >= 32767:
+                                self.logger.warning("Audio may be clipping!")
+
+                        # Normalize audio data to prevent distortion
+                        audio_array = np.int16(audio_array / np.max(np.abs(audio_array)) * 32767)
+                        
                         # Create WAV data directly without intermediate conversions
                         import wave
                         import io
@@ -767,8 +778,14 @@ class MusicIdentifier:
                                 with open(debug_audio_path, 'wb') as f:
                                     f.write(audio_data)
                                 
-                                # Play the audio using pygame
-                                pygame.mixer.init(frequency=self.RATE, channels=self.CHANNELS)
+                                # Initialize mixer with specific settings for Raspberry Pi
+                                pygame.mixer.quit()  # Reset mixer
+                                pygame.mixer.init(
+                                    frequency=self.RATE,
+                                    size=-16,  # Signed 16-bit
+                                    channels=self.CHANNELS,
+                                    buffer=4096  # Larger buffer for smoother playback
+                                )
                                 pygame.mixer.music.load(debug_audio_path)
                                 pygame.mixer.music.play()
                                 
@@ -777,9 +794,11 @@ class MusicIdentifier:
                                     await asyncio.sleep(0.1)
                                     
                                 pygame.mixer.music.unload()
+                                pygame.mixer.quit()  # Clean up mixer
                                 self.logger.debug("Finished playing captured audio")
                             except Exception as e:
                                 self.logger.error(f"Error playing debug audio: {e}")
+                                self.logger.debug(f"Full error: {str(e)}")
 
                         wav_buffer.close()
 
