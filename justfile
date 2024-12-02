@@ -44,23 +44,23 @@ install:
         echo "Configuring ALSA..."
         # Create or update asound.conf
         sudo tee /etc/asound.conf > /dev/null << EOL
-pcm.!default {
-    type asym
-    playback.pcm {
-        type plug
-        slave.pcm "hw:0,0"
+    pcm.!default {
+        type asym
+        playback.pcm {
+            type plug
+            slave.pcm "hw:0,0"
+        }
+        capture.pcm {
+            type plug
+            slave.pcm "hw:2,0"  # USB Audio Device
+        }
     }
-    capture.pcm {
-        type plug
-        slave.pcm "hw:2,0"  # USB Audio Device
-    }
-}
 
-ctl.!default {
-    type hw
-    card 0
-}
-EOL
+    ctl.!default {
+        type hw
+        card 0
+    }
+    EOL
 
         # Add user to audio group
         sudo usermod -a -G audio $USER
