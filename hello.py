@@ -589,12 +589,22 @@ class MusicIdentifier:
             return
 
         try:
-            # Get the highest quality image available
+            # Get the appropriate quality image based on spec mode
             image_url = None
-            if 'coverarthq' in track['images']:
-                image_url = track['images']['coverarthq']
-            elif 'coverart' in track['images']:
-                image_url = track['images']['coverart']
+            spec_mode = self.config.get('display', {}).get('spec_mode', False)
+            
+            if spec_mode:
+                # On spec machines, prefer the standard resolution
+                if 'coverart' in track['images']:
+                    image_url = track['images']['coverart']
+                elif 'coverarthq' in track['images']:
+                    image_url = track['images']['coverarthq']
+            else:
+                # On normal machines, prefer the high quality version
+                if 'coverarthq' in track['images']:
+                    image_url = track['images']['coverarthq']
+                elif 'coverart' in track['images']:
+                    image_url = track['images']['coverart']
             
             if not image_url:
                 self.logger.warning("No suitable album art URL found")
