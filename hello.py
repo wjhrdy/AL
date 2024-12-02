@@ -40,7 +40,7 @@ class MusicIdentifier:
         # Audio parameters
         self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
         self.CHANNELS = 1  # Mono audio
-        self.RATE = 48000 if sys.platform.startswith('linux') else 16000  # 48kHz on Linux, 16kHz default
+        self.RATE = 44100 if sys.platform.startswith('linux') else 16000  # 48kHz on Linux, 16kHz default
         self.CHUNK = 2048  # Larger chunks for better performance
         
         # Initialize PyAudio first
