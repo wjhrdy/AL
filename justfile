@@ -35,101 +35,12 @@ install:
         sudo apt-get update
         # Install Python with specific version
         sudo apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-venv
-        # Install audio dependencies including those needed for PyAudio and JACK
-        sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc \
-            jackd2 libjack-jackd2-dev jack-tools qjackctl pulseaudio-module-jack \
-            alsa-utils alsa-tools
-
-        # Configure ALSA
-        echo "Configuring ALSA..."
-        # Create or update asound.conf
-        sudo tee /etc/asound.conf > /dev/null << EOL
-    pcm.!default {
-        type asym
-        playback.pcm {
-            type plug
-            slave.pcm "hw:0,0"
-        }
-        capture.pcm {
-            type plug
-            slave.pcm "hw:2,0"  # USB Audio Device
-        }
-    }
-
-    ctl.!default {
-        type hw
-        card 0
-    }
-    EOL
-
-        # Add user to audio group
-        sudo usermod -a -G audio $USER
-
-        # Configure JACK to start automatically
-        echo "Configuring JACK..."
-        # Configure JACK defaults
-        sudo tee /etc/security/limits.d/99-audio.conf > /dev/null << EOL
-    @audio   -  rtprio     95
-    @audio   -  memlock    unlimited
-    EOL
+        # Install only essential audio dependencies
+        sudo apt-get install -y python3-pygame libportaudio0 libportaudio2 \
+            libportaudiocpp0 portaudio19-dev python3-dev gcc
         
-        # Create systemd user service for JACK
-        mkdir -p ~/.config/systemd/user
-        tee ~/.config/systemd/user/jack.service > /dev/null << EOL
-    [Unit]
-    Description=JACK Audio Server
-    After=sound.target
-
-    [Service]
-    Type=simple
-    ExecStart=/usr/bin/jackd -d alsa -d hw:2,0 -r 44100 -p 1024 -n 2
-    LimitRTPRIO=95
-    LimitMEMLOCK=infinity
-    Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
-
-    [Install]
-    WantedBy=default.target
-    EOL
-
-        # Enable and start JACK service for the user
-        systemctl --user daemon-reload || true
-        systemctl --user enable jack.service || true
-        systemctl --user start jack.service || true
-
-        # Configure JACK
-        echo "Configuring JACK..."
-        # Create JACK config directory if it doesnt exist
-        mkdir -p ~/.config/jack
-
-        # Create JACK configuration
-        tee ~/.config/jack/conf.xml > /dev/null << EOL
-    <?xml version="1.0"?>
-    <jack>
-    <engine>
-        <option name="realtime">yes</option>
-        <option name="realtime-priority">10</option>
-        <option name="port-max">128</option>
-        <option name="verbose">no</option>
-    </engine>
-    <drivers>
-        <driver name="alsa">
-        <option name="device">hw:2,0</option>
-        <option name="capture">hw:2,0</option>
-        <option name="rate">44100</option>
-        <option name="period">1024</option>
-        <option name="nperiods">2</option>
-        <option name="hwmon">false</option>
-        <option name="duplex">true</option>
-        <option name="softmode">false</option>
-        <option name="monitor">false</option>
-        <option name="dither">n</option>
-        </driver>
-    </drivers>
-    </jack>
-    EOL
-
-        # Restart ALSA
-        sudo alsactl kill rescan || true
+        # Add user to audio group for permissions
+        sudo usermod -a -G audio $USER
     else
         echo "Unsupported operating system: $OSTYPE"
         exit 1
