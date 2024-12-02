@@ -115,7 +115,7 @@ class MusicIdentifier:
         # Audio parameters
         self.FORMAT = pyaudio.paFloat32  # Changed from paInt16 to paFloat32
         self.CHANNELS = 1  # Will be updated when device is selected
-        self.RATE = 16000  # Will be updated when device is selected
+        self.RATE = 44100  # Will be updated when device is selected
         self.CHUNK = 1024
         
         # Initialize PyAudio
@@ -718,8 +718,10 @@ class MusicIdentifier:
                     start=False  # Don't start the stream immediately
                 )
                 
-                # Try to prepare the stream before starting it
-                self.stream.prepare()
+                # Try to prepare the stream before starting it (Linux only)
+                if sys.platform.startswith('linux'):
+                    self.logger.info("Preparing stream (Linux only)")
+                    self.stream.prepare()
                 
                 # Now start the stream
                 if not self.start_stream():
