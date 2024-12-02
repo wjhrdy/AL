@@ -70,35 +70,35 @@ install:
 
         # Configure JACK
         echo "Configuring JACK..."
-        # Create JACK config directory if it doesn't exist
+        # Create JACK config directory if it doesnt exist
         mkdir -p ~/.config/jack
 
         # Create JACK configuration
         tee ~/.config/jack/conf.xml > /dev/null << EOL
-<?xml version="1.0"?>
-<jack>
-  <engine>
-    <option name="realtime">yes</option>
-    <option name="realtime-priority">10</option>
-    <option name="port-max">128</option>
-    <option name="verbose">no</option>
-  </engine>
-  <drivers>
-    <driver name="alsa">
-      <option name="device">hw:2,0</option>
-      <option name="capture">hw:2,0</option>
-      <option name="rate">44100</option>
-      <option name="period">1024</option>
-      <option name="nperiods">2</option>
-      <option name="hwmon">false</option>
-      <option name="duplex">true</option>
-      <option name="softmode">false</option>
-      <option name="monitor">false</option>
-      <option name="dither">n</option>
-    </driver>
-  </drivers>
-</jack>
-EOL
+    <?xml version="1.0"?>
+    <jack>
+    <engine>
+        <option name="realtime">yes</option>
+        <option name="realtime-priority">10</option>
+        <option name="port-max">128</option>
+        <option name="verbose">no</option>
+    </engine>
+    <drivers>
+        <driver name="alsa">
+        <option name="device">hw:2,0</option>
+        <option name="capture">hw:2,0</option>
+        <option name="rate">44100</option>
+        <option name="period">1024</option>
+        <option name="nperiods">2</option>
+        <option name="hwmon">false</option>
+        <option name="duplex">true</option>
+        <option name="softmode">false</option>
+        <option name="monitor">false</option>
+        <option name="dither">n</option>
+        </driver>
+    </drivers>
+    </jack>
+    EOL
 
         # Restart ALSA
         sudo alsactl kill rescan || true
