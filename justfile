@@ -154,7 +154,7 @@ debug-open:
     #!/usr/bin/env bash
     set -euo pipefail
     DEVICE=$(just select-device) || exit 1
-    .venv/bin/python hello.py --debug--device "$DEVICE" --always-open
+    .venv/bin/python hello.py --debug --device "$DEVICE" --always-open
 
 # Clean up virtual environment and cache
 clean:
