@@ -135,92 +135,71 @@ class MusicIdentifier:
 
     def _find_input_device(self, device_index=None):
         """Find the audio input device to use."""
-        p = pyaudio.PyAudio()
+        input_devices = []
+        default_index = None
         
-        if device_index is not None:
-            try:
-                device_info = p.get_device_info_by_index(device_index)
-                if device_info['maxInputChannels'] > 0:
-                    # Set audio parameters based on the device
-                    self.CHANNELS = min(device_info['maxInputChannels'], 1)  # Use mono, or whatever device supports
-                    self.RATE = int(device_info['defaultSampleRate'])  # Use the device's default sample rate
-                    
-                    # On Linux, try to use the hw: device directly
-                    if sys.platform.startswith('linux') and 'hw:' in device_info['name']:
-                        self.logger.info(f"Using Linux ALSA hardware device: {device_info['name']}")
-                    
-                    print(f"Using device: {device_info['name']}")
-                    print(f"Sample rate: {self.RATE}")
-                    print(f"Channels: {self.CHANNELS}")
-                    return device_index
-                else:
-                    print(f"Error: Device {device_index} has no input channels")
-                    sys.exit(1)
-            except Exception as e:
-                print(f"Error: Invalid device index {device_index}: {str(e)}")
-                sys.exit(1)
-        
-        # List all input devices
-        input_devices = []  # Store actual input devices with their original indices
-        info = p.get_host_api_info_by_index(0)
-        numdevices = info.get('deviceCount')
-        
-        # Get default input device
         try:
-            default_device = p.get_default_input_device_info()
-            default_index = default_device['index']
-            self.logger.info(f"Default input device: {default_device['name']} (index: {default_index})")
-        except IOError:
-            default_index = None
-            self.logger.warning("No default input device found")
+            default_host = self.p.get_default_host_api_info()
+            default_index = default_host.get('defaultInputDevice')
+        except OSError:
+            self.logger.warning("Could not get default input device")
         
-        for i in range(numdevices):
+        # List all devices and find input devices
+        for i in range(self.p.get_device_count()):
             try:
-                device_info = p.get_device_info_by_index(i)
-                if device_info.get('maxInputChannels') > 0:
-                    input_devices.append((i, device_info))  # Keep original index
+                dev_info = self.p.get_device_info_by_index(i)
+                if dev_info['maxInputChannels'] > 0:  # If it has input channels
+                    input_devices.append((i, dev_info))
+                    self.logger.debug(f"Found input device {i}: {dev_info['name']}")
+                    # Print supported sample rates if in debug mode
                     if self.debug_mode:
-                        self.logger.info(f"Found input device {i}: {device_info['name']}")
-                        self.logger.info(f"  Max Input Channels: {device_info['maxInputChannels']}")
-                        self.logger.info(f"  Default Sample Rate: {device_info['defaultSampleRate']}")
-            except IOError as e:
+                        try:
+                            supported_rates = [
+                                rate for rate in [8000, 11025, 16000, 22050, 44100, 48000, 96000]
+                                if self._is_rate_supported(i, rate)
+                            ]
+                            self.logger.debug(f"Supported rates for device {i}: {supported_rates}")
+                        except Exception as e:
+                            self.logger.debug(f"Could not check rates for device {i}: {e}")
+            except Exception as e:
                 self.logger.warning(f"Error getting device info for index {i}: {e}")
-        
+                continue
+
         if not input_devices:
-            self.logger.error("No input devices found!")
+            self.logger.error("No input devices found")
             sys.exit(1)
-        
-        # Check if a specific device was requested
-        if self.device_index is not None:
-            # Look up the device by its original index
-            for original_idx, dev_info in input_devices:
-                if original_idx == self.device_index:
-                    self.logger.info(f"Using selected device {self.device_index}: {dev_info['name']}")
-                    return self.device_index
-            # If device_index is not valid, exit with error instead of falling through
-            self.logger.error(f"Selected device index {self.device_index} is not valid")
-            sys.exit(1)
-        
+
+        # If a specific device was requested, verify it
+        if device_index is not None:
+            if not any(idx == device_index for idx, _ in input_devices):
+                self.logger.error(f"Selected device index {self.device_index} is not valid")
+                sys.exit(1)
+            # Get supported rates for the selected device
+            self.RATE = self._get_best_rate(device_index)
+            return device_index
+
         # If there's only one device, use it automatically
         if len(input_devices) == 1:
             dev_idx, dev_info = input_devices[0]
             print(f"\nAutomatically selecting the only available device: {dev_info['name']}")
+            self.RATE = self._get_best_rate(dev_idx)
             return dev_idx
-        
+
         # If we have a default device and no specific device was requested, use it
         if default_index is not None:
             for original_idx, dev_info in input_devices:
                 if original_idx == default_index:
                     print(f"\nUsing default input device: {dev_info['name']}")
+                    self.RATE = self._get_best_rate(original_idx)
                     return original_idx
-        
+
         # Interactive device selection
         while True:
             print("\nAvailable input devices:")
             for original_idx, dev_info in input_devices:
                 is_default = original_idx == default_index
                 print(f"{original_idx}: {dev_info['name']}{' (default)' if is_default else ''}")
-        
+
             try:
                 selection = input("\nSelect input device (number or Enter for default): ").strip()
                 if not selection and default_index is not None:
@@ -228,16 +207,18 @@ class MusicIdentifier:
                     for original_idx, dev_info in input_devices:
                         if original_idx == default_index:
                             print(f"Using default device: {dev_info['name']}")
+                            self.RATE = self._get_best_rate(original_idx)
                             return original_idx
-            
+
                 if not selection:
                     continue
-            
+
                 device_index = int(selection)
                 # Look up the device by its original index
                 for original_idx, dev_info in input_devices:
                     if original_idx == device_index:
                         self.logger.info(f"Using device {device_index}: {dev_info['name']}")
+                        self.RATE = self._get_best_rate(device_index)
                         return device_index
                 print("Invalid selection. Please try again.")
             except ValueError:
@@ -245,6 +226,43 @@ class MusicIdentifier:
             except KeyboardInterrupt:
                 print("\nExiting...")
                 sys.exit(0)
+
+    def _is_rate_supported(self, device_index, rate):
+        """Check if a sample rate is supported by the device."""
+        try:
+            supported = self.p.is_format_supported(
+                rate,
+                input_device=device_index,
+                input_channels=self.CHANNELS,
+                input_format=self.FORMAT
+            )
+            return supported
+        except Exception:
+            return False
+
+    def _get_best_rate(self, device_index):
+        """Get the best supported sample rate for the device."""
+        # Try common sample rates in order of preference
+        preferred_rates = [16000, 44100, 48000, 22050, 11025, 8000]
+        
+        for rate in preferred_rates:
+            if self._is_rate_supported(device_index, rate):
+                self.logger.info(f"Using sample rate: {rate}")
+                return rate
+        
+        # If none of our preferred rates work, get the default rate from the device
+        try:
+            dev_info = self.p.get_device_info_by_index(device_index)
+            default_rate = int(dev_info.get('defaultSampleRate', 44100))
+            if self._is_rate_supported(device_index, default_rate):
+                self.logger.info(f"Using device default sample rate: {default_rate}")
+                return default_rate
+        except Exception as e:
+            self.logger.warning(f"Error getting device default rate: {e}")
+        
+        # Fall back to 44100 if nothing else works
+        self.logger.warning("Falling back to 44100 Hz")
+        return 44100
 
     def list_devices():
         """List all available input devices without starting the program"""
@@ -558,73 +576,6 @@ class MusicIdentifier:
                 # Draw artist name (centered, no scroll needed for artist)
                 artist_rect = artist_surface.get_rect(center=(self.screen_width // 2, self.screen_height // 2 + 40))
                 self.screen.blit(artist_surface, artist_rect)
-        else:
-            # If no song is playing or we're showing the schedule, show schedule information
-            if self.schedule_showing or (not self.last_identified):
-                if not self._is_within_operating_hours():
-                    # Get off-hours message from config
-                    message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-                    # Render screensaver
-                    text_surface = self._update_screensaver(message, font_size=48)
-                    self.screen.blit(text_surface, self.screensaver_pos)
-                else:
-                    message = self._get_schedule_message()
-                    lines = message.split('\n')
-                    
-                    # Calculate dynamic font sizes based on screen height - adjusted for screen width
-                    header_font_size = min(int(self.screen_height * 0.13), 100)  # Slightly smaller header
-                    schedule_font_size = min(int(self.screen_height * 0.09), 72)  # Adjusted for width
-                    
-                    # Get the number of schedule groups
-                    num_groups = 0
-                    if self.config and 'schedule' in self.config:
-                        # Count unique hour combinations
-                        hour_groups = set()
-                        for item in self.config['schedule']:
-                            hour_groups.add(f"{item['open']}-{item['close']}")
-                        num_groups = len(hour_groups)
-                    
-                    # Adjust spacings based on number of groups
-                    if num_groups <= 3:
-                        group_spacing = int(self.screen_height * 0.15)  # Original spacing for 3 or fewer groups
-                        hour_spacing = int(self.screen_height * 0.08)
-                        header_spacing = int(self.screen_height * 0.18)
-                    else:
-                        # Reduce spacing proportionally when there are more groups
-                        scale_factor = min(1.0, 3 / num_groups)  # Scale down as groups increase
-                        group_spacing = int(self.screen_height * 0.15 * scale_factor)
-                        hour_spacing = int(self.screen_height * 0.08 * scale_factor)
-                        header_spacing = int(self.screen_height * 0.18 * scale_factor)
-                    
-                    # Calculate starting Y position (15% from top for more space when many groups)
-                    start_y = int(self.screen_height * 0.15)
-                    
-                    # Render each line
-                    current_y = start_y
-                    for i, line in enumerate(lines):
-                        if line.strip():  # Only render non-empty lines
-                            if i == 0:  # Header line
-                                font = pygame.font.Font(None, header_font_size)
-                                text_surface = self.render_text_with_outline(
-                                    line, font, (255, 255, 255), (0, 0, 0), 4)  # Thicker outline
-                                current_y = start_y
-                            else:  # Schedule lines
-                                font = pygame.font.Font(None, schedule_font_size)
-                                text_surface = self.render_text_with_outline(
-                                    line.strip(), font, (255, 255, 255), (0, 0, 0), 3)  # Thicker outline
-                                
-                                if i == 1:  # First line after header
-                                    current_y += header_spacing
-                                # Use tighter spacing for hours (every even line after header)
-                                elif i % 2 == 0:
-                                    current_y += hour_spacing
-                                else:
-                                    # Add full group spacing before each day group
-                                    current_y += group_spacing
-                                
-                            # Center the text horizontally
-                            text_rect = text_surface.get_rect(centerx=self.screen_width//2, centery=current_y)
-                            self.screen.blit(text_surface, text_rect)
 
         # Draw notification on top if active
         self.draw_notification()
