@@ -40,8 +40,8 @@ class MusicIdentifier:
         # Audio parameters
         self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
         self.CHANNELS = 1  # Mono audio
-        self.RATE = 44100 if sys.platform.startswith('linux') else 16000  # 441kHz on Linux, 16kHz default
-        self.CHUNK = 2048  # Larger chunks for better performance
+        self.RATE = 44100 if sys.platform.startswith('linux') else 16000  # 44.1kHz on Linux, 16kHz default
+        self.CHUNK = 4096  # Increased chunk size for more stable recording
         
         # Initialize PyAudio first
         self.p = pyaudio.PyAudio()
@@ -710,8 +710,12 @@ class MusicIdentifier:
                     input=True,
                     input_device_index=self.input_device_index,
                     frames_per_buffer=self.CHUNK,
-                    start=True  # Start the stream immediately
+                    start=True,  # Start the stream immediately
+                    stream_callback=None,  # Use blocking mode for more reliable capture
+                    input_host_api_specific_stream_info=None
                 )
+                # Let the stream settle
+                await asyncio.sleep(0.5)
             except IOError as e:
                 self.logger.error(f"Error opening stream: {str(e)}")
                 if hasattr(self, 'stream'):
@@ -735,11 +739,26 @@ class MusicIdentifier:
 
                 # Read audio data
                 try:
+                    # Use a shorter timeout to prevent blocking too long
                     data = self.stream.read(self.CHUNK, exception_on_overflow=False)
-                    # Convert data to numpy array (now using int16)
+                    if not data:
+                        self.logger.warning("No data received from audio stream")
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    # Convert data to numpy array
                     audio_chunk = np.frombuffer(data, dtype=np.int16)
+                    
+                    # Check for invalid audio data
+                    if np.any(np.isnan(audio_chunk)) or np.any(np.isinf(audio_chunk)):
+                        self.logger.warning("Invalid audio data detected, skipping chunk")
+                        continue
+                        
                     buffer.append(audio_chunk)
                     buffer_duration += self.CHUNK / self.RATE
+
+                    if self.debug_mode and len(buffer) % 10 == 0:  # Log every 10 chunks
+                        self.logger.debug(f"Buffer size: {len(buffer)} chunks, Duration: {buffer_duration:.2f}s")
 
                     # Once we have enough audio data
                     if buffer_duration >= target_duration:
