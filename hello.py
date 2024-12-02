@@ -757,6 +757,30 @@ class MusicIdentifier:
                             wav_file.writeframes(audio_array.tobytes())
                         
                         audio_data = wav_buffer.getvalue()
+
+                        # In debug mode, save and play back the captured audio
+                        if self.debug_mode:
+                            self.logger.debug("Playing captured audio for verification...")
+                            try:
+                                # Save to a temporary WAV file
+                                debug_audio_path = os.path.join(self.debug_dir, 'debug_audio.wav')
+                                with open(debug_audio_path, 'wb') as f:
+                                    f.write(audio_data)
+                                
+                                # Play the audio using pygame
+                                pygame.mixer.init(frequency=self.RATE, channels=self.CHANNELS)
+                                pygame.mixer.music.load(debug_audio_path)
+                                pygame.mixer.music.play()
+                                
+                                # Wait for playback to finish
+                                while pygame.mixer.music.get_busy():
+                                    await asyncio.sleep(0.1)
+                                    
+                                pygame.mixer.music.unload()
+                                self.logger.debug("Finished playing captured audio")
+                            except Exception as e:
+                                self.logger.error(f"Error playing debug audio: {e}")
+
                         wav_buffer.close()
 
                         # Clear the buffer
