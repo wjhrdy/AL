@@ -592,24 +592,33 @@ class MusicIdentifier:
             # Get the appropriate quality image based on spec mode
             image_url = None
             spec_mode = self.config.get('display', {}).get('spec_mode', False)
+            self.logger.info(f"Display mode - Spec mode: {spec_mode}")
             
             if spec_mode:
                 # On spec machines, prefer the standard resolution
                 if 'coverart' in track['images']:
                     image_url = track['images']['coverart']
+                    self.logger.debug("Using standard resolution coverart")
                 elif 'coverarthq' in track['images']:
                     image_url = track['images']['coverarthq']
+                    self.logger.debug("Falling back to high quality coverart")
             else:
                 # On normal machines, prefer the high quality version
                 if 'coverarthq' in track['images']:
                     image_url = track['images']['coverarthq']
+                    self.logger.debug("Using high quality coverart")
                 elif 'coverart' in track['images']:
                     image_url = track['images']['coverart']
+                    self.logger.debug("Falling back to standard resolution coverart")
             
             if not image_url:
                 self.logger.warning("No suitable album art URL found")
                 self.current_background = None
                 return
+
+            # Log available image URLs for debugging
+            self.logger.debug(f"Available image types: {list(track['images'].keys())}")
+            self.logger.info(f"Selected image URL: {image_url}")
 
             # Implement caching to avoid re-downloading the same image
             cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cache')
@@ -621,32 +630,58 @@ class MusicIdentifier:
 
             # Check if image is already cached
             if os.path.exists(cache_path):
-                self.logger.debug("Loading album art from cache")
-                image_data = open(cache_path, 'rb').read()
+                self.logger.info("Loading album art from cache")
+                try:
+                    image_data = open(cache_path, 'rb').read()
+                    self.logger.debug(f"Successfully read {len(image_data)} bytes from cache")
+                except Exception as e:
+                    self.logger.error(f"Failed to read from cache: {e}")
+                    raise
             else:
                 # Download with timeout and retries
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(image_url, timeout=10) as response:
-                        if response.status == 200:
-                            image_data = await response.read()
-                            # Cache the downloaded image
-                            with open(cache_path, 'wb') as f:
-                                f.write(image_data)
-                        else:
-                            raise Exception(f"Failed to download image: {response.status}")
+                self.logger.info("Downloading album art...")
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(image_url, timeout=10) as response:
+                            if response.status == 200:
+                                image_data = await response.read()
+                                self.logger.debug(f"Downloaded {len(image_data)} bytes")
+                                # Cache the downloaded image
+                                with open(cache_path, 'wb') as f:
+                                    f.write(image_data)
+                                    self.logger.debug("Successfully cached downloaded image")
+                            else:
+                                self.logger.error(f"Download failed with status: {response.status}")
+                                raise Exception(f"Failed to download image: {response.status}")
+                except Exception as e:
+                    self.logger.error(f"Error during download: {e}")
+                    raise
 
             # Load image with Pygame
-            image_stream = BytesIO(image_data)
-            image = pygame.image.load(image_stream)
-            
-            # Convert to RGB mode if necessary (handles PNG transparency)
-            if image.get_alpha():
-                image = image.convert_alpha()
-            else:
-                image = image.convert()
+            self.logger.info("Loading image with Pygame...")
+            try:
+                image_stream = BytesIO(image_data)
+                image = pygame.image.load(image_stream)
+                self.logger.debug(f"Original image size: {image.get_size()}")
+                
+                # Convert to RGB mode if necessary (handles PNG transparency)
+                if image.get_alpha():
+                    self.logger.debug("Converting image with alpha channel")
+                    image = image.convert_alpha()
+                else:
+                    self.logger.debug("Converting image without alpha channel")
+                    image = image.convert()
 
-            self.current_background = image
-            self.logger.debug("Successfully loaded and displayed album art")
+                self.current_background = image
+                self.logger.info("Successfully loaded and displayed album art")
+                self.logger.debug(f"Final image size: {self.current_background.get_size()}")
+
+            except pygame.error as e:
+                self.logger.error(f"Pygame error loading image: {e}")
+                raise
+            except Exception as e:
+                self.logger.error(f"Unexpected error loading image: {e}")
+                raise
 
         except Exception as e:
             self.logger.error(f"Error displaying album art: {e}")
