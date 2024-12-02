@@ -65,8 +65,38 @@ install:
         # Add user to audio group
         sudo usermod -a -G audio $USER
 
-        # Start and enable JACK service
-        sudo systemctl enable --now jack.service || true
+        # Configure JACK to start automatically
+        echo "Configuring JACK..."
+        # Add user to audio group for JACK
+        sudo usermod -a -G audio,jackaudio $USER
+        
+        # Configure JACK defaults
+        sudo tee /etc/security/limits.d/99-audio.conf > /dev/null << EOL
+    @audio   -  rtprio     95
+    @audio   -  memlock    unlimited
+    EOL
+        
+        # Create systemd user service for JACK
+        mkdir -p ~/.config/systemd/user
+        tee ~/.config/systemd/user/jack.service > /dev/null << EOL
+    [Unit]
+    Description=JACK Audio Server
+    After=sound.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/bin/jackd -d alsa -d hw:2,0 -r 44100 -p 1024 -n 2
+    LimitRTPRIO=95
+    LimitMEMLOCK=infinity
+    Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+
+    [Install]
+    WantedBy=default.target
+    EOL
+
+        # Enable and start JACK service for the user
+        systemctl --user enable jack.service || true
+        systemctl --user start jack.service || true
 
         # Configure JACK
         echo "Configuring JACK..."
