@@ -40,7 +40,7 @@ class MusicIdentifier:
         # Audio parameters
         self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
         self.CHANNELS = 1  # Mono audio
-        self.RATE = 16000  # Initial rate, will be updated based on device
+        self.RATE = 48000 if sys.platform.startswith('linux') else 16000  # 48kHz on Linux, 16kHz default
         self.CHUNK = 2048  # Larger chunks for better performance
         
         # Initialize PyAudio first
@@ -242,7 +242,7 @@ class MusicIdentifier:
     def _get_best_rate(self, device_index):
         """Get the best supported sample rate for the device."""
         # Try common sample rates in order of preference
-        preferred_rates = [16000, 44100, 48000, 22050, 11025, 8000]
+        preferred_rates = [16000, 48000, 22050, 11025, 8000]
         
         for rate in preferred_rates:
             if self._is_rate_supported(device_index, rate):
