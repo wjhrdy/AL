@@ -40,18 +40,13 @@ class MusicIdentifier:
         # Initialize audio with error handling
         try:
             self.audio = pyaudio.PyAudio()
-            # List available devices
-            info = self.audio.get_host_api_info_by_index(0)
-            numdevices = info.get('deviceCount')
-            for i in range(0, numdevices):
-                if (self.audio.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-                    self.logger.info(f"Input Device {i}: {self.audio.get_device_info_by_host_api_device_index(0, i).get('name')}")
+            # Use existing device selection logic
+            self.input_device_index = self._find_input_device(device_index)
+            if self.input_device_index is None:
+                raise RuntimeError("No suitable input device found")
             
-            # Use default input device if none specified
-            if device_index is None:
-                default_device = self.audio.get_default_input_device_info()
-                self.device_index = default_device['index']
-                self.logger.info(f"Default input device: {default_device['name']} (index: {self.device_index})")
+            device_info = self.audio.get_device_info_by_index(self.input_device_index)
+            self.logger.info(f"Using input device: {device_info['name']} (index: {self.input_device_index})")
             
         except Exception as e:
             self.logger.error(f"Error initializing audio: {str(e)}")
@@ -125,7 +120,6 @@ class MusicIdentifier:
         
         # Initialize PyAudio
         self.p = pyaudio.PyAudio()
-        self.input_device_index = self._find_input_device(device_index)
         
         # Schedule display timing
         self.last_schedule_display = 0
