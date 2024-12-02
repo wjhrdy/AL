@@ -67,9 +67,6 @@ install:
 
         # Configure JACK to start automatically
         echo "Configuring JACK..."
-        # Add user to audio group for JACK
-        sudo usermod -a -G audio,jackaudio $USER
-        
         # Configure JACK defaults
         sudo tee /etc/security/limits.d/99-audio.conf > /dev/null << EOL
     @audio   -  rtprio     95
@@ -95,6 +92,7 @@ install:
     EOL
 
         # Enable and start JACK service for the user
+        systemctl --user daemon-reload || true
         systemctl --user enable jack.service || true
         systemctl --user start jack.service || true
 
