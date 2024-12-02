@@ -457,6 +457,23 @@ class MusicIdentifier:
             visible_surface.set_alpha(int(alpha * 255))
             self.screen.blit(visible_surface, ((self.screen_width - max_width) // 2, y_pos))
 
+    def _should_show_schedule(self, current_time):
+        """Determine if the schedule should be shown based on timing and state."""
+        # If already showing, check if we should continue
+        if self.schedule_showing:
+            schedule_duration = self.config.get('display', {}).get('schedule_duration', 10)
+            return current_time - self.schedule_show_start < schedule_duration
+            
+        # Get schedule interval from config, default to 1 hour
+        schedule_interval = self.config.get('display', {}).get('schedule_interval', 60)
+        
+        # Show more frequently when no song is playing
+        if not self.last_identified:
+            schedule_interval = min(schedule_interval, 10)
+            
+        # Check if it's time to show the schedule
+        return current_time - self.last_schedule_display >= schedule_interval
+
     def draw_window(self):
         """Draw the window contents."""
         if not pygame.display.get_init():
@@ -465,29 +482,16 @@ class MusicIdentifier:
         # Clear the window
         self.screen.fill((0, 0, 0))  # Black background
 
-        # Get schedule display settings
-        schedule_interval = self.config.get('display', {}).get('schedule_interval', 60)  # Default 60 seconds
-        schedule_duration = self.config.get('display', {}).get('schedule_duration', 10)  # Default 10 seconds
         current_time = time.time()
-
-        # Check if we should enable permanent schedule display (10 minutes without song change)
-        if self.last_song_time and current_time - self.last_song_time >= 600:  # 600 seconds = 10 minutes
-            self.permanent_schedule = True
-            self.schedule_showing = True
-        # Reset permanent schedule when a new song is detected
-        elif self.last_song_time and current_time - self.last_song_time < 600:
-            self.permanent_schedule = False
-
-        # Check if it's time to show the schedule (only if not permanent)
-        if not self.permanent_schedule:
-            if not self.schedule_showing and current_time - self.last_schedule_display >= schedule_interval:
+        
+        # Update schedule display state
+        if self._should_show_schedule(current_time):
+            if not self.schedule_showing:
                 self.schedule_showing = True
                 self.schedule_show_start = current_time
                 self.last_schedule_display = current_time
-
-            # Check if we should stop showing the schedule
-            if self.schedule_showing and current_time - self.schedule_show_start >= schedule_duration:
-                self.schedule_showing = False
+        else:
+            self.schedule_showing = False
 
         # Draw the current background if it exists and we're not showing the schedule
         if self.current_background is not None and not self.schedule_showing:
@@ -575,6 +579,60 @@ class MusicIdentifier:
                 # Draw artist name (centered, no scroll needed for artist)
                 artist_rect = artist_surface.get_rect(center=(self.screen_width // 2, self.screen_height // 2 + 40))
                 self.screen.blit(artist_surface, artist_rect)
+
+        # Show schedule or off-hours message
+        if self.schedule_showing or not self.last_identified:
+            # Get the schedule message
+            schedule_text = self._get_schedule_message()
+            lines = schedule_text.split('\n')
+            
+            # Calculate font sizes
+            header_font_size = min(int(self.screen_height * 0.13), 72)
+            schedule_font_size = min(int(self.screen_height * 0.09), 48)
+            
+            # Calculate vertical spacing
+            spacing = int(self.screen_height * 0.1)  # Space between lines
+            total_height = len(lines) * spacing
+            start_y = (self.screen_height - total_height) // 2  # Center vertically
+            
+            # Render each line
+            current_y = start_y
+            for i, line in enumerate(lines):
+                if not line.strip():  # Skip empty lines
+                    continue
+                    
+                # Use larger font for header
+                font_size = header_font_size if i == 0 else schedule_font_size
+                font = pygame.font.Font(None, font_size)
+                
+                # Render text with outline
+                text_surface = self.render_text_with_outline(
+                    line.strip(),
+                    font,
+                    (255, 255, 255),  # White text
+                    (0, 0, 0),        # Black outline
+                    3                  # Outline width
+                )
+                
+                # Center the text horizontally
+                text_rect = text_surface.get_rect(centerx=self.screen_width//2, top=current_y)
+                self.screen.blit(text_surface, text_rect)
+                
+                current_y += spacing
+
+            # If outside operating hours, show the message
+            if not self._is_within_operating_hours():
+                message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
+                font = pygame.font.Font(None, 48)
+                text_surface = self.render_text_with_outline(
+                    message,
+                    font,
+                    (255, 0, 0),  # Red text
+                    (0, 0, 0),    # Black outline
+                    3             # Outline width
+                )
+                text_rect = text_surface.get_rect(centerx=self.screen_width//2, bottom=self.screen_height - 50)
+                self.screen.blit(text_surface, text_rect)
 
         # Draw notification on top if active
         self.draw_notification()
@@ -732,11 +790,35 @@ class MusicIdentifier:
                 self.handle_events()
                 
                 if not self._is_within_operating_hours() and not self.always_open:
+                    # Display the schedule and off-hours message
+                    schedule_text = self._get_schedule_message()
+                    off_hours_message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
+                    
+                    # Create font for messages if not exists
+                    if not self.font:
+                        self.font = pygame.font.Font(None, 36)
+                    
+                    # Render schedule text
+                    schedule_lines = schedule_text.split('\n')
+                    y_pos = self.screen_height // 4  # Start from 1/4 of the screen height
+                    
+                    for line in schedule_lines:
+                        if line.strip():  # Only render non-empty lines
+                            text_surface = self.render_text_with_outline(line, self.font, self.TEXT_COLOR)
+                            text_rect = text_surface.get_rect(center=(self.screen_width // 2, y_pos))
+                            self.screen.blit(text_surface, text_rect)
+                            y_pos += 40  # Space between lines
+                    
+                    # Render off-hours message at the bottom
+                    message_surface = self.render_text_with_outline(off_hours_message, self.font, (255, 0, 0))  # Red color
+                    message_rect = message_surface.get_rect(center=(self.screen_width // 2, self.screen_height * 3 // 4))
+                    self.screen.blit(message_surface, message_rect)
+                    
                     await asyncio.sleep(1)
                     self.draw_window()
                     pygame.display.flip()
                     continue
-
+                
                 # Read audio data
                 try:
                     # Use a shorter timeout to prevent blocking too long
