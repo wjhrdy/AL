@@ -113,10 +113,10 @@ class MusicIdentifier:
         self.permanent_schedule = False  # New flag for permanent schedule display
         
         # Audio parameters
-        self.FORMAT = pyaudio.paFloat32  # Changed from paInt16 to paFloat32
-        self.CHANNELS = 1  # Will be updated when device is selected
-        self.RATE = 44100  # Will be updated when device is selected
-        self.CHUNK = 1024
+        self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
+        self.CHANNELS = 1  # Mono audio
+        self.RATE = 16000  # Match Shazam's internal sample rate
+        self.CHUNK = 2048  # Larger chunks for better performance
         
         # Initialize PyAudio
         self.p = pyaudio.PyAudio()
@@ -726,7 +726,7 @@ class MusicIdentifier:
             # Create a buffer for audio data
             buffer = []
             buffer_duration = 0
-            target_duration = 5  # seconds of audio to collect
+            target_duration = 3  # seconds of audio to collect
 
             while True:
                 # Handle Pygame events
@@ -741,8 +741,8 @@ class MusicIdentifier:
                 # Read audio data
                 try:
                     data = self.stream.read(self.CHUNK, exception_on_overflow=False)
-                    # Convert data to numpy array directly
-                    audio_chunk = np.frombuffer(data, dtype=np.float32)
+                    # Convert data to numpy array (now using int16)
+                    audio_chunk = np.frombuffer(data, dtype=np.int16)
                     buffer.append(audio_chunk)
                     buffer_duration += self.CHUNK / self.RATE
 
@@ -750,19 +750,18 @@ class MusicIdentifier:
                     if buffer_duration >= target_duration:
                         # Concatenate all chunks
                         audio_array = np.concatenate(buffer)
-                        # Convert to int16
-                        audio_int16 = (audio_array * 32767).astype(np.int16)
-                        # Create AudioSegment
-                        audio_segment = AudioSegment(
-                            audio_int16.tobytes(),
-                            frame_rate=self.RATE,
-                            sample_width=2,  # 16-bit audio
-                            channels=self.CHANNELS
-                        )
                         
-                        # Export to WAV format in memory
-                        wav_buffer = audio_segment.export(format="wav")
-                        audio_data = wav_buffer.read()
+                        # Create WAV data directly without intermediate conversions
+                        import wave
+                        import io
+                        wav_buffer = io.BytesIO()
+                        with wave.open(wav_buffer, 'wb') as wav_file:
+                            wav_file.setnchannels(self.CHANNELS)
+                            wav_file.setsampwidth(2)  # 16-bit audio
+                            wav_file.setframerate(self.RATE)
+                            wav_file.writeframes(audio_array.tobytes())
+                        
+                        audio_data = wav_buffer.getvalue()
                         wav_buffer.close()
 
                         # Clear the buffer
