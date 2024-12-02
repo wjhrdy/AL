@@ -143,7 +143,12 @@ class MusicIdentifier:
                 if device_info['maxInputChannels'] > 0:
                     # Set audio parameters based on the device
                     self.CHANNELS = min(device_info['maxInputChannels'], 1)  # Use mono, or whatever device supports
-                    self.RATE = int(device_info['defaultSampleRate'])
+                    self.RATE = int(device_info['defaultSampleRate'])  # Use the device's default sample rate
+                    
+                    # On Linux, try to use the hw: device directly
+                    if sys.platform.startswith('linux') and 'hw:' in device_info['name']:
+                        self.logger.info(f"Using Linux ALSA hardware device: {device_info['name']}")
+                    
                     print(f"Using device: {device_info['name']}")
                     print(f"Sample rate: {self.RATE}")
                     print(f"Channels: {self.CHANNELS}")
@@ -702,14 +707,29 @@ class MusicIdentifier:
             self.font = pygame.font.Font(None, 36)
 
             # Initialize audio stream with error handling
-            stream = self.p.open(
-                format=self.FORMAT,
-                channels=self.CHANNELS,
-                rate=self.RATE,
-                input=True,
-                input_device_index=self.input_device_index,
-                frames_per_buffer=self.CHUNK
-            )
+            try:
+                self.stream = self.p.open(
+                    format=self.FORMAT,
+                    channels=self.CHANNELS,
+                    rate=self.RATE,
+                    input=True,
+                    input_device_index=self.input_device_index,
+                    frames_per_buffer=self.CHUNK,
+                    start=False  # Don't start the stream immediately
+                )
+                
+                # Try to prepare the stream before starting it
+                self.stream.prepare()
+                
+                # Now start the stream
+                if not self.start_stream():
+                    raise Exception("Failed to start stream")
+                
+            except IOError as e:
+                self.logger.error(f"Error opening stream: {str(e)}")
+                if hasattr(self, 'stream'):
+                    self.stream.close()
+                raise
             
             # Create a buffer for audio data
             buffer = []
@@ -728,7 +748,7 @@ class MusicIdentifier:
 
                 # Read audio data
                 try:
-                    data = stream.read(self.CHUNK, exception_on_overflow=False)
+                    data = self.stream.read(self.CHUNK, exception_on_overflow=False)
                     # Convert data to numpy array directly
                     audio_chunk = np.frombuffer(data, dtype=np.float32)
                     buffer.append(audio_chunk)
@@ -805,10 +825,39 @@ class MusicIdentifier:
                 import traceback
                 self.logger.debug(traceback.format_exc())
         finally:
-            if 'stream' in locals():
-                stream.stop_stream()
-                stream.close()
+            if hasattr(self, 'stream'):
+                self.stream.stop_stream()
+                self.stream.close()
             pygame.quit()
+
+    def start_stream(self):
+        """Start the audio stream with robust error handling."""
+        try:
+            if not hasattr(self, 'stream') or self.stream is None:
+                self.logger.error("Audio stream not initialized")
+                return False
+            
+            # Ensure the stream isn't already active
+            if self.stream.is_active():
+                self.logger.warning("Stream is already active")
+                return True
+            
+            # Start the stream with error checking
+            try:
+                self.stream.start_stream()
+                if not self.stream.is_active():
+                    self.logger.error("Failed to start stream - stream not active after start")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Error starting stream: {str(e)}")
+                return False
+            
+            self.logger.info("Audio stream started successfully")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Unexpected error in start_stream: {str(e)}")
+            return False
 
     def show_notification(self, title, message, duration=3):
         """Show a notification message on the screen."""
