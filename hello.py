@@ -242,7 +242,7 @@ class MusicIdentifier:
     def _get_best_rate(self, device_index):
         """Get the best supported sample rate for the device."""
         # Try common sample rates in order of preference
-        preferred_rates = [16000, 48000, 22050, 11025, 8000]
+        preferred_rates = [16000, 44100, 48000, 22050, 11025, 8000]
         
         for rate in preferred_rates:
             if self._is_rate_supported(device_index, rate):
