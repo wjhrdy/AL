@@ -37,7 +37,71 @@ install:
         sudo apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-venv
         # Install audio dependencies including those needed for PyAudio and JACK
         sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc \
-            jackd2 libjack-jackd2-dev jack-tools qjackctl pulseaudio-module-jack
+            jackd2 libjack-jackd2-dev jack-tools qjackctl pulseaudio-module-jack \
+            alsa-utils alsa-tools
+
+        # Configure ALSA
+        echo "Configuring ALSA..."
+        # Create or update asound.conf
+        sudo tee /etc/asound.conf > /dev/null << EOL
+pcm.!default {
+    type asym
+    playback.pcm {
+        type plug
+        slave.pcm "hw:0,0"
+    }
+    capture.pcm {
+        type plug
+        slave.pcm "hw:2,0"  # USB Audio Device
+    }
+}
+
+ctl.!default {
+    type hw
+    card 0
+}
+EOL
+
+        # Add user to audio group
+        sudo usermod -a -G audio $USER
+
+        # Start and enable JACK service
+        sudo systemctl enable --now jack.service || true
+
+        # Configure JACK
+        echo "Configuring JACK..."
+        # Create JACK config directory if it doesn't exist
+        mkdir -p ~/.config/jack
+
+        # Create JACK configuration
+        tee ~/.config/jack/conf.xml > /dev/null << EOL
+<?xml version="1.0"?>
+<jack>
+  <engine>
+    <option name="realtime">yes</option>
+    <option name="realtime-priority">10</option>
+    <option name="port-max">128</option>
+    <option name="verbose">no</option>
+  </engine>
+  <drivers>
+    <driver name="alsa">
+      <option name="device">hw:2,0</option>
+      <option name="capture">hw:2,0</option>
+      <option name="rate">44100</option>
+      <option name="period">1024</option>
+      <option name="nperiods">2</option>
+      <option name="hwmon">false</option>
+      <option name="duplex">true</option>
+      <option name="softmode">false</option>
+      <option name="monitor">false</option>
+      <option name="dither">n</option>
+    </driver>
+  </drivers>
+</jack>
+EOL
+
+        # Restart ALSA
+        sudo alsactl kill rescan || true
     else
         echo "Unsupported operating system: $OSTYPE"
         exit 1
