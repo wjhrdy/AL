@@ -715,18 +715,8 @@ class MusicIdentifier:
                     input=True,
                     input_device_index=self.input_device_index,
                     frames_per_buffer=self.CHUNK,
-                    start=False  # Don't start the stream immediately
+                    start=True  # Start the stream immediately
                 )
-                
-                # Try to prepare the stream before starting it (Linux only)
-                if sys.platform.startswith('linux'):
-                    self.logger.info("Preparing stream (Linux only)")
-                    self.stream.prepare()
-                
-                # Now start the stream
-                if not self.start_stream():
-                    raise Exception("Failed to start stream")
-                
             except IOError as e:
                 self.logger.error(f"Error opening stream: {str(e)}")
                 if hasattr(self, 'stream'):
