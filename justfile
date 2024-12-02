@@ -150,7 +150,7 @@ debug:
     .venv/bin/python hello.py --debug --device "$DEVICE"
 
 # Run the application with always-open flag
-debug_open:
+debug-open:
     #!/usr/bin/env bash
     set -euo pipefail
     DEVICE=$(just select-device) || exit 1
