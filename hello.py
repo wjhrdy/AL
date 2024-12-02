@@ -37,15 +37,23 @@ class MusicIdentifier:
         self.logger = logging.getLogger(__name__)
         self.logger.debug("Initializing MusicIdentifier in debug mode" if debug_mode else "Initializing MusicIdentifier")
         
+        # Audio parameters
+        self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
+        self.CHANNELS = 1  # Mono audio
+        self.RATE = 16000  # Initial rate, will be updated based on device
+        self.CHUNK = 2048  # Larger chunks for better performance
+        
+        # Initialize PyAudio first
+        self.p = pyaudio.PyAudio()
+        
         # Initialize audio with error handling
         try:
-            self.audio = pyaudio.PyAudio()
             # Use existing device selection logic
             self.input_device_index = self._find_input_device(device_index)
             if self.input_device_index is None:
                 raise RuntimeError("No suitable input device found")
             
-            device_info = self.audio.get_device_info_by_index(self.input_device_index)
+            device_info = self.p.get_device_info_by_index(self.input_device_index)
             self.logger.info(f"Using input device: {device_info['name']} (index: {self.input_device_index})")
             
         except Exception as e:
@@ -111,15 +119,6 @@ class MusicIdentifier:
         self.show_duration = 5.0  # Show title for 5 seconds
         self.current_background = None
         self.permanent_schedule = False  # New flag for permanent schedule display
-        
-        # Audio parameters
-        self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
-        self.CHANNELS = 1  # Mono audio
-        self.RATE = 16000  # Match Shazam's internal sample rate
-        self.CHUNK = 2048  # Larger chunks for better performance
-        
-        # Initialize PyAudio
-        self.p = pyaudio.PyAudio()
         
         # Schedule display timing
         self.last_schedule_display = 0
