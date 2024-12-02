@@ -35,12 +35,9 @@ install:
         sudo apt-get update
         # Install Python with specific version
         sudo apt-get install -y python$PYTHON_VERSION python$PYTHON_VERSION-venv
-        # Install only essential audio dependencies
-        sudo apt-get install -y python3-pygame libportaudio0 libportaudio2 \
-            libportaudiocpp0 portaudio19-dev python3-dev gcc
-        
-        # Add user to audio group for permissions
-        sudo usermod -a -G audio $USER
+        # Install audio dependencies including those needed for PyAudio and JACK
+        sudo apt-get install -y python3-pygame libportaudio2 portaudio19-dev python3-dev gcc \
+            jackd2 libjack-jackd2-dev jack-tools qjackctl pulseaudio-module-jack
     else
         echo "Unsupported operating system: $OSTYPE"
         exit 1
@@ -142,20 +139,22 @@ select-device:
 run: 
     #!/usr/bin/env bash
     set -euo pipefail
-    .venv/bin/python hello.py
+    DEVICE=$(just select-device) || exit 1
+    .venv/bin/python hello.py --device "$DEVICE"
 
 # Run the application in debug mode
 debug:
     #!/usr/bin/env bash
     set -euo pipefail
-    .venv/bin/python hello.py --debug 
+    DEVICE=$(just select-device) || exit 1
+    .venv/bin/python hello.py --debug --device "$DEVICE"
 
 # Run the application with always-open flag
-debug-open:
+debug_open:
     #!/usr/bin/env bash
     set -euo pipefail
-    source .venv/bin/activate
-    .venv/bin/python hello.py --always-open
+    DEVICE=$(just select-device) || exit 1
+    .venv/bin/python hello.py --debug--device "$DEVICE" --always-open
 
 # Clean up virtual environment and cache
 clean:
