@@ -17,16 +17,32 @@ import hashlib
 import yaml
 import threading
 from pydub import AudioSegment
+from soco import discover
+import soco
 
 # Suppress urllib3 warnings
 warnings.filterwarnings('ignore', category=Warning)
 
 class MusicIdentifier:
     def __init__(self, debug_mode=False, device_index=None, always_open=False):
+        # Ensure imports are available
+        import os
+        import yaml
+        import logging
+        import time
+        import pygame
+        import pyaudio
+        
         self.debug_mode = debug_mode
         self.device_index = device_index
         self.always_open = always_open
         self.start_time = time.time()
+        
+        # Sonos state tracking
+        self.sonos_is_playing = False
+        self.last_sonos_check = 0
+        self.sonos_check_interval = 1.0  # Normal interval (1 second)
+        self.sonos_check_interval_paused = 5.0  # Longer interval when paused (5 seconds)
         
         # Set up logging
         log_level = logging.DEBUG if debug_mode else logging.INFO
@@ -36,6 +52,11 @@ class MusicIdentifier:
         )
         self.logger = logging.getLogger(__name__)
         self.logger.debug("Initializing MusicIdentifier in debug mode" if debug_mode else "Initializing MusicIdentifier")
+        
+        # Display offset configuration
+        self.display_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'display-config.yaml')
+        self.display_offset = {'x': 0, 'y': 0}  # Default center offset
+        self.load_display_config()
         
         # Audio parameters
         self.FORMAT = pyaudio.paInt16  # Use int16 format which matches Shazam's requirements
@@ -131,6 +152,10 @@ class MusicIdentifier:
         self.screensaver_last_update = time.time()
         self.screensaver_color = (255, 255, 255)  # Initial color
         self.screensaver_color_direction = [1, 1, 1]  # Color change direction for RGB
+
+        # Initialize Sonos discovery
+        self.sonos_speaker = None
+        self.init_sonos()
 
     def _find_input_device(self, device_index=None):
         """Find the audio input device to use."""
@@ -417,10 +442,11 @@ class MusicIdentifier:
     def draw_scrolling_text(self, text_surface, y_pos, alpha, max_width):
         """Draw scrolling text if it's wider than the screen."""
         text_width = text_surface.get_width()
+        screen_width = pygame.display.get_surface().get_width()  # Get actual screen width
         
         if text_width <= max_width:
-            # If text fits, center it precisely
-            x_pos = (self.screen_width - text_width) // 2  # Center relative to screen width, not max_width
+            # If text fits, center it precisely using actual screen width
+            x_pos = (screen_width - text_width) // 2
             # Create a temporary surface with alpha support
             temp_surface = pygame.Surface((text_width, text_surface.get_height()), pygame.SRCALPHA)
             temp_surface.blit(text_surface, (0, 0))
@@ -455,7 +481,8 @@ class MusicIdentifier:
             # Draw the visible portion of the text
             visible_surface.blit(text_surface, (-x_scroll, 0))
             visible_surface.set_alpha(int(alpha * 255))
-            self.screen.blit(visible_surface, ((self.screen_width - max_width) // 2, y_pos))
+            # Center using actual screen width
+            self.screen.blit(visible_surface, ((screen_width - max_width) // 2, y_pos))
 
     def _should_show_schedule(self, current_time):
         """Determine if the schedule should be shown based on timing and state."""
@@ -474,10 +501,42 @@ class MusicIdentifier:
         # Check if it's time to show the schedule
         return current_time - self.last_schedule_display >= schedule_interval
 
+    def wrap_text(self, text, font, max_width):
+        """Wrap text to fit within a given width."""
+        words = text.split(' ')
+        lines = []
+        current_line = []
+        current_width = 0
+
+        for word in words:
+            word_surface = font.render(word, True, (0, 0, 0))  # Color doesn't matter for measurement
+            word_width = word_surface.get_width()
+            
+            # Add space width if not first word in line
+            space_width = font.render(' ', True, (0, 0, 0)).get_width() if current_line else 0
+            
+            if current_width + word_width + space_width <= max_width:
+                current_line.append(word)
+                current_width += word_width + space_width
+            else:
+                if current_line:  # If we have a line to add
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+                current_width = word_width
+        
+        if current_line:  # Add the last line
+            lines.append(' '.join(current_line))
+        
+        return lines
+
     def draw_window(self):
         """Draw the window contents."""
         if not pygame.display.get_init():
             return
+
+        # Get actual screen dimensions
+        screen_width = pygame.display.get_surface().get_width()
+        screen_height = pygame.display.get_surface().get_height()
 
         # Clear the window
         self.screen.fill((0, 0, 0))  # Black background
@@ -495,16 +554,13 @@ class MusicIdentifier:
 
         # Draw the current background if it exists and we're not showing the schedule
         if self.current_background is not None and not self.schedule_showing:
-            # Get the current display size
-            display_width, display_height = pygame.display.get_surface().get_size()
-            
             # Get the original image dimensions
             img_width = self.current_background.get_width()
             img_height = self.current_background.get_height()
             
             # Calculate the scale to fit the image while maintaining aspect ratio
-            scale = min(display_width / img_width, 
-                      display_height / img_height)
+            scale = min(screen_width / img_width, 
+                      screen_height / img_height)
             
             # Calculate the base dimensions that maintain the aspect ratio
             base_width = int(img_width * scale)
@@ -524,9 +580,11 @@ class MusicIdentifier:
                 (target_width, target_height)
             )
             
-            # Center the image
-            x_pos = (display_width - target_width) // 2
-            y_pos = (display_height - target_height) // 2
+            # Center the image with offset
+            x_pos, y_pos = self.apply_display_offset(
+                (screen_width - target_width) // 2,
+                (screen_height - target_height) // 2
+            )
             self.screen.blit(scaled_surface, (x_pos, y_pos))
 
         # Draw song info if available and we're not showing the schedule
@@ -566,19 +624,28 @@ class MusicIdentifier:
                 )
                 
                 # Calculate maximum width for text (80% of screen width)
-                max_width = int(self.screen_width * 0.8)
+                max_width = int(screen_width * 0.8)
+                
+                # Apply vertical offset to text positions
+                _, title_y = self.apply_display_offset(0, screen_height // 2 - 40)
+                _, artist_y = self.apply_display_offset(0, screen_height // 2 + 40)
                 
                 # Draw title with scrolling if needed
                 self.draw_scrolling_text(
                     title_surface,
-                    self.screen_height // 2 - 40,  # Title position
+                    title_y,  # Title position with offset
                     alpha,
                     max_width
                 )
                 
-                # Draw artist name (centered, no scroll needed for artist)
-                artist_rect = artist_surface.get_rect(center=(self.screen_width // 2, self.screen_height // 2 + 40))
-                self.screen.blit(artist_surface, artist_rect)
+                # Draw artist name with proper centering
+                x_pos, _ = self.apply_display_offset(screen_width // 2, 0)
+                artist_rect = artist_surface.get_rect(center=(x_pos, artist_y))
+                # Create a temporary surface with alpha support
+                temp_surface = pygame.Surface(artist_surface.get_size(), pygame.SRCALPHA)
+                temp_surface.blit(artist_surface, (0, 0))
+                temp_surface.set_alpha(int(alpha))
+                self.screen.blit(temp_surface, artist_rect)
 
         # Show schedule or off-hours message
         if self.schedule_showing or not self.last_identified:
@@ -586,17 +653,20 @@ class MusicIdentifier:
             schedule_text = self._get_schedule_message()
             lines = schedule_text.split('\n')
             
-            # Calculate font sizes
-            header_font_size = min(int(self.screen_height * 0.13), 72)
-            schedule_font_size = min(int(self.screen_height * 0.09), 48)
+            # Check if we're outside operating hours
+            is_outside_hours = not self._is_within_operating_hours()
             
-            # Calculate vertical spacing
-            spacing = int(self.screen_height * 0.1)  # Space between lines
-            total_height = len(lines) * spacing
-            start_y = (self.screen_height - total_height) // 2  # Center vertically
+            # Calculate font sizes based on screen height
+            # If outside operating hours, reduce font size to 75%
+            size_multiplier = 0.75 if is_outside_hours else 1.0
+            header_font_size = min(int(screen_height * 0.13 * size_multiplier), int(72 * size_multiplier))
+            schedule_font_size = min(int(screen_height * 0.09 * size_multiplier), int(48 * size_multiplier))
             
-            # Render each line
-            current_y = start_y
+            # Pre-render all lines to calculate total height
+            rendered_lines = []
+            total_height = 0
+            max_width = 0
+            
             for i, line in enumerate(lines):
                 if not line.strip():  # Skip empty lines
                     continue
@@ -611,28 +681,76 @@ class MusicIdentifier:
                     font,
                     (255, 255, 255),  # White text
                     (0, 0, 0),        # Black outline
-                    3                  # Outline width
+                    3 if not is_outside_hours else 2  # Slightly smaller outline for smaller text
                 )
                 
-                # Center the text horizontally
-                text_rect = text_surface.get_rect(centerx=self.screen_width//2, top=current_y)
-                self.screen.blit(text_surface, text_rect)
+                rendered_lines.append(text_surface)
+                total_height += text_surface.get_height()
+                max_width = max(max_width, text_surface.get_width())
                 
-                current_y += spacing
+                # Add spacing between lines
+                if i < len(lines) - 1:
+                    total_height += int(screen_height * (0.02 if not is_outside_hours else 0.015))  # Adjust spacing for 75% text
+            
+            # Calculate starting Y position to center all text vertically with offset
+            # If outside hours, move schedule up to make room for message
+            vertical_shift = int(screen_height * 0.15) if is_outside_hours else 0  # Shift up by 15% when outside hours
+            _, base_y = self.apply_display_offset(0, (screen_height - total_height) // 2 - vertical_shift)
+            current_y = base_y
+            
+            # Draw each line
+            for text_surface in rendered_lines:
+                # Center horizontally with offset
+                x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+                text_rect = text_surface.get_rect(
+                    centerx=x_pos,
+                    top=current_y
+                )
+                self.screen.blit(text_surface, text_rect)
+                current_y += text_surface.get_height() + int(screen_height * (0.02 if not is_outside_hours else 0.015))
 
-            # If outside operating hours, show the message
-            if not self._is_within_operating_hours():
+            # If outside operating hours, show the message at the bottom
+            if is_outside_hours:
                 message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
                 font = pygame.font.Font(None, 48)
-                text_surface = self.render_text_with_outline(
-                    message,
-                    font,
-                    (255, 0, 0),  # Red text
-                    (0, 0, 0),    # Black outline
-                    3             # Outline width
-                )
-                text_rect = text_surface.get_rect(centerx=self.screen_width//2, bottom=self.screen_height - 50)
-                self.screen.blit(text_surface, text_rect)
+                
+                # Calculate maximum width for wrapped text (70% of screen width)
+                max_width = int(screen_width * 0.7)
+                
+                # Wrap the text
+                wrapped_lines = self.wrap_text(message, font, max_width)
+                
+                # Calculate total height of wrapped text
+                line_height = font.get_linesize()
+                total_height = len(wrapped_lines) * line_height
+                
+                # Render each line with outline
+                rendered_lines = []
+                for line in wrapped_lines:
+                    text_surface = self.render_text_with_outline(
+                        line,
+                        font,
+                        (255, 0, 0),  # Red text
+                        (0, 0, 0),    # Black outline
+                        3             # Outline width
+                    )
+                    rendered_lines.append(text_surface)
+                
+                # Calculate starting Y position for the entire block of text
+                bottom_padding = int(screen_height * 0.05)  # 5% padding from bottom
+                start_y = screen_height - bottom_padding - total_height
+                
+                # Draw each line
+                current_y = start_y
+                for text_surface in rendered_lines:
+                    # Center horizontally with offset
+                    x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+                    text_rect = text_surface.get_rect(
+                        centerx=x_pos,
+                        top=current_y
+                    )
+                    self.screen.blit(text_surface, text_rect)
+                    current_y += line_height
 
         # Draw notification on top if active
         self.draw_notification()
@@ -749,7 +867,7 @@ class MusicIdentifier:
             self.current_background = None
 
     async def run(self):
-        """Main application loop with improved music detection."""
+        """Main application loop with Sonos integration."""
         try:
             # Initialize Pygame display
             pygame.display.set_caption("Music Identifier")
@@ -768,12 +886,10 @@ class MusicIdentifier:
                     input=True,
                     input_device_index=self.input_device_index,
                     frames_per_buffer=self.CHUNK,
-                    start=True,  # Start the stream immediately
+                    start=False,  # Don't start immediately
                     stream_callback=None,  # Use blocking mode for more reliable capture
                     input_host_api_specific_stream_info=None
                 )
-                # Let the stream settle
-                await asyncio.sleep(0.5)
             except IOError as e:
                 self.logger.error(f"Error opening stream: {str(e)}")
                 if hasattr(self, 'stream'):
@@ -784,6 +900,7 @@ class MusicIdentifier:
             buffer = []
             buffer_duration = 0
             target_duration = 3  # seconds of audio to collect
+            audio_stream_active = False
 
             while True:
                 # Handle Pygame events
@@ -791,156 +908,125 @@ class MusicIdentifier:
                 
                 if not self._is_within_operating_hours() and not self.always_open:
                     # Display the schedule and off-hours message
-                    schedule_text = self._get_schedule_message()
-                    off_hours_message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-                    
-                    # Create font for messages if not exists
-                    if not self.font:
-                        self.font = pygame.font.Font(None, 36)
-                    
-                    # Render schedule text
-                    schedule_lines = schedule_text.split('\n')
-                    y_pos = self.screen_height // 4  # Start from 1/4 of the screen height
-                    
-                    for line in schedule_lines:
-                        if line.strip():  # Only render non-empty lines
-                            text_surface = self.render_text_with_outline(line, self.font, self.TEXT_COLOR)
-                            text_rect = text_surface.get_rect(center=(self.screen_width // 2, y_pos))
-                            self.screen.blit(text_surface, text_rect)
-                            y_pos += 40  # Space between lines
-                    
-                    # Render off-hours message at the bottom
-                    message_surface = self.render_text_with_outline(off_hours_message, self.font, (255, 0, 0))  # Red color
-                    message_rect = message_surface.get_rect(center=(self.screen_width // 2, self.screen_height * 3 // 4))
-                    self.screen.blit(message_surface, message_rect)
-                    
-                    await asyncio.sleep(1)
                     self.draw_window()
-                    pygame.display.flip()
+                    await asyncio.sleep(1)
                     continue
                 
-                # Read audio data
-                try:
-                    # Use a shorter timeout to prevent blocking too long
-                    data = self.stream.read(self.CHUNK, exception_on_overflow=False)
-                    if not data:
-                        self.logger.warning("No data received from audio stream")
-                        await asyncio.sleep(0.1)
-                        continue
-
-                    # Convert data to numpy array
-                    audio_chunk = np.frombuffer(data, dtype=np.int16)
-                    
-                    # Check for invalid audio data
-                    if np.any(np.isnan(audio_chunk)) or np.any(np.isinf(audio_chunk)):
-                        self.logger.warning("Invalid audio data detected, skipping chunk")
-                        continue
-                        
-                    buffer.append(audio_chunk)
-                    buffer_duration += self.CHUNK / self.RATE
-
-                    if self.debug_mode and len(buffer) % 10 == 0:  # Log every 10 chunks
-                        self.logger.debug(f"Buffer size: {len(buffer)} chunks, Duration: {buffer_duration:.2f}s")
-
-                    # Once we have enough audio data
-                    if buffer_duration >= target_duration:
-                        # Concatenate all chunks
-                        audio_array = np.concatenate(buffer)
-                        
-                        # Debug audio statistics
-                        if self.debug_mode:
-                            self.logger.debug(f"Audio stats - Min: {audio_array.min()}, Max: {audio_array.max()}, Mean: {audio_array.mean():.2f}")
-                            self.logger.debug(f"Sample rate: {self.RATE}, Channels: {self.CHANNELS}, Format: {self.FORMAT}")
-                            # Check for potential clipping
-                            if abs(audio_array.max()) >= 32767 or abs(audio_array.min()) >= 32767:
-                                self.logger.warning("Audio may be clipping!")
-
-                        # Normalize audio data to prevent distortion
-                        audio_array = np.int16(audio_array / np.max(np.abs(audio_array)) * 32767)
-                        
-                        # Create WAV data directly without intermediate conversions
-                        import wave
-                        import io
-                        wav_buffer = io.BytesIO()
-                        with wave.open(wav_buffer, 'wb') as wav_file:
-                            wav_file.setnchannels(self.CHANNELS)
-                            wav_file.setsampwidth(2)  # 16-bit audio
-                            wav_file.setframerate(self.RATE)
-                            wav_file.writeframes(audio_array.tobytes())
-                        
-                        audio_data = wav_buffer.getvalue()
-
-                        # In debug mode, save and play back the captured audio
-                        if self.debug_mode:
-                            self.logger.debug("Playing captured audio for verification...")
-                            try:
-                                # Save to a temporary WAV file
-                                debug_audio_path = os.path.join(self.debug_dir, 'debug_audio.wav')
-                                with open(debug_audio_path, 'wb') as f:
-                                    f.write(audio_data)
-                                
-                                # Initialize mixer with specific settings for Raspberry Pi
-                                pygame.mixer.quit()  # Reset mixer
-                                pygame.mixer.init(
-                                    frequency=self.RATE,
-                                    size=-16,  # Signed 16-bit
-                                    channels=self.CHANNELS,
-                                    buffer=4096  # Larger buffer for smoother playback
-                                )
-                                pygame.mixer.music.load(debug_audio_path)
-                                pygame.mixer.music.play()
-                                
-                                # Wait for playback to finish
-                                while pygame.mixer.music.get_busy():
-                                    await asyncio.sleep(0.1)
-                                    
-                                pygame.mixer.music.unload()
-                                pygame.mixer.quit()  # Clean up mixer
-                                self.logger.debug("Finished playing captured audio")
-                            except Exception as e:
-                                self.logger.error(f"Error playing debug audio: {e}")
-                                self.logger.debug(f"Full error: {str(e)}")
-
-                        wav_buffer.close()
-
-                        # Clear the buffer
+                # Try to get track info from Sonos first
+                sonos_track = await self.get_sonos_track_info()
+                
+                # Manage audio stream based on Sonos state
+                if sonos_track:
+                    # If Sonos is playing and stream is active, stop it
+                    if audio_stream_active:
+                        self.stream.stop_stream()
+                        audio_stream_active = False
                         buffer.clear()
                         buffer_duration = 0
-
+                        self.logger.debug("Stopped audio input - Sonos is playing")
+                    
+                    # Check if this is a new song
+                    if (not self.last_identified or 
+                        sonos_track['title'] != self.last_identified['title'] or
+                        sonos_track['artist'] != self.last_identified['artist']):
+                        
+                        self.last_identified = sonos_track
+                        self.last_song_time = time.time()
+                        
+                        # Display album art
+                        await self.display_album_art(sonos_track)
+                        
+                        # Log the identification
+                        self.logger.info(f"Sonos playing: {sonos_track['title']} by {sonos_track['artist']}")
+                
+                # If no Sonos track is playing, use audio recognition
+                else:
+                    # Start audio stream if not active
+                    if not audio_stream_active:
                         try:
-                            # Recognize song using the WAV data
-                            result = await self.shazam.recognize(audio_data)
-                            
-                            if result and 'track' in result:
-                                # Create new song info from the raw result first
-                                current_song = {
-                                    'title': result['track'].get('title', 'Unknown Title'),
-                                    'artist': result['track'].get('subtitle', 'Unknown Artist')
-                                }
-
-                                # Check if this is a new song
-                                if (not self.last_identified or 
-                                    current_song['title'] != self.last_identified['title'] or
-                                    current_song['artist'] != self.last_identified['artist']):
-                                    
-                                    self.last_identified = current_song
-                                    self.last_song_time = time.time()
-                                    
-                                    # Log the identification
-                                    self.logger.info(f"Identified: {current_song['title']} by {current_song['artist']}")
-                                    
-                                    # Display album art
-                                    await self.display_album_art(result['track'])
+                            self.stream.start_stream()
+                            audio_stream_active = True
+                            self.logger.debug("Started audio input - Sonos not playing")
                         except Exception as e:
-                            self.logger.error(f"Error in song recognition: {e}")
-                            if self.debug_mode:
-                                import traceback
-                                self.logger.debug(traceback.format_exc())
+                            self.logger.error(f"Error starting audio stream: {e}")
+                            await asyncio.sleep(0.1)
+                            continue
+                    
+                    # Read audio data
+                    try:
+                        # Use a shorter timeout to prevent blocking too long
+                        data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+                        if not data:
+                            self.logger.warning("No data received from audio stream")
+                            await asyncio.sleep(0.1)
+                            continue
 
-                except IOError as e:
-                    self.logger.error(f"Audio stream error: {e}")
-                    await asyncio.sleep(0.1)
-                    continue
+                        # Convert data to numpy array
+                        audio_chunk = np.frombuffer(data, dtype=np.int16)
+                        
+                        # Check for invalid audio data
+                        if np.any(np.isnan(audio_chunk)) or np.any(np.isinf(audio_chunk)):
+                            self.logger.warning("Invalid audio data detected, skipping chunk")
+                            continue
+                            
+                        buffer.append(audio_chunk)
+                        buffer_duration += self.CHUNK / self.RATE
+
+                        if self.debug_mode and len(buffer) % 10 == 0:  # Log every 10 chunks
+                            self.logger.debug(f"Buffer size: {len(buffer)} chunks, Duration: {buffer_duration:.2f}s")
+
+                        # Once we have enough audio data
+                        if buffer_duration >= target_duration:
+                            # Process audio data for recognition
+                            # ... (rest of the audio processing code remains the same)
+                            audio_array = np.concatenate(buffer)
+                            audio_array = np.int16(audio_array / np.max(np.abs(audio_array)) * 32767)
+                            
+                            # Create WAV data
+                            import wave
+                            import io
+                            wav_buffer = io.BytesIO()
+                            with wave.open(wav_buffer, 'wb') as wav_file:
+                                wav_file.setnchannels(self.CHANNELS)
+                                wav_file.setsampwidth(2)
+                                wav_file.setframerate(self.RATE)
+                                wav_file.writeframes(audio_array.tobytes())
+                            
+                            audio_data = wav_buffer.getvalue()
+                            wav_buffer.close()
+
+                            # Clear the buffer
+                            buffer.clear()
+                            buffer_duration = 0
+
+                            try:
+                                # Recognize song
+                                result = await self.shazam.recognize(audio_data)
+                                
+                                if result and 'track' in result:
+                                    current_song = {
+                                        'title': result['track'].get('title', 'Unknown Title'),
+                                        'artist': result['track'].get('subtitle', 'Unknown Artist')
+                                    }
+
+                                    if (not self.last_identified or 
+                                        current_song['title'] != self.last_identified['title'] or
+                                        current_song['artist'] != self.last_identified['artist']):
+                                        
+                                        self.last_identified = current_song
+                                        self.last_song_time = time.time()
+                                        self.logger.info(f"Identified: {current_song['title']} by {current_song['artist']}")
+                                        await self.display_album_art(result['track'])
+                            except Exception as e:
+                                self.logger.error(f"Error in song recognition: {e}")
+                                if self.debug_mode:
+                                    import traceback
+                                    self.logger.debug(traceback.format_exc())
+
+                    except IOError as e:
+                        self.logger.error(f"Audio stream error: {e}")
+                        await asyncio.sleep(0.1)
+                        continue
 
                 # Update display
                 self.draw_window()
@@ -1003,8 +1089,11 @@ class MusicIdentifier:
         if hasattr(self, 'notification'):
             current_time = time.time()
             if current_time - self.notification['start_time'] < self.notification['duration']:
+                # Get actual screen dimensions
+                screen_width = pygame.display.get_surface().get_width()
+                
                 # Draw semi-transparent background
-                notification_surface = pygame.Surface((self.screen_width, 80))
+                notification_surface = pygame.Surface((screen_width, 80))
                 notification_surface.set_alpha(200)
                 notification_surface.fill((0, 0, 0))
                 self.screen.blit(notification_surface, (0, 0))
@@ -1016,8 +1105,10 @@ class MusicIdentifier:
                 title_text = title_font.render(self.notification['title'], True, (255, 255, 255))
                 message_text = message_font.render(self.notification['message'], True, (200, 200, 200))
 
-                title_rect = title_text.get_rect(centerx=self.screen_width//2, top=10)
-                message_rect = message_text.get_rect(centerx=self.screen_width//2, top=45)
+                # Apply horizontal offset to text positions
+                x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+                title_rect = title_text.get_rect(centerx=x_pos, top=10)
+                message_rect = message_text.get_rect(centerx=x_pos, top=45)
 
                 self.screen.blit(title_text, title_rect)
                 self.screen.blit(message_text, message_rect)
@@ -1101,9 +1192,27 @@ class MusicIdentifier:
             base_url = remote_config['url'].rstrip('/')
             # Convert GitHub Gist URL to raw URL
             if 'gist.github.com' in base_url:
-                # Extract the Gist ID and construct raw URL
+                # First fetch the gist metadata to get the files
                 gist_id = base_url.split('/')[-1]
-                url = f"https://gist.githubusercontent.com/wjhrdy/{gist_id}/raw"
+                api_url = f"https://api.github.com/gists/{gist_id}"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(api_url) as response:
+                        if response.status == 200:
+                            gist_data = await response.json()
+                            # Get the first file's raw URL
+                            if gist_data.get('files'):
+                                first_file = next(iter(gist_data['files'].values()))
+                                url = first_file.get('raw_url')
+                                if not url:
+                                    self.logger.error("Could not find raw URL in Gist response")
+                                    return None
+                            else:
+                                self.logger.error("No files found in Gist")
+                                return None
+                        else:
+                            self.logger.error(f"Failed to fetch Gist metadata: HTTP {response.status}")
+                            return None
             else:
                 url = base_url + '/raw'
                 
@@ -1184,6 +1293,15 @@ class MusicIdentifier:
         """Toggle between normal and stretched mode to compensate for 16:9 to 4:3 conversion."""
         self.is_stretched = not self.is_stretched
 
+    def toggle_always_open(self):
+        """Toggle between always open and scheduled hours mode."""
+        self.always_open = not self.always_open
+        self.show_notification(
+            "Mode Changed",
+            "Always Open: ON" if self.always_open else "Always Open: OFF"
+        )
+        self.logger.info(f"Always open mode: {self.always_open}")
+
     def handle_events(self):
         """Handle pygame events including fullscreen and stretch toggles."""
         for event in pygame.event.get():
@@ -1199,8 +1317,19 @@ class MusicIdentifier:
                     self.toggle_fullscreen()
                 elif event.key == pygame.K_s:
                     self.toggle_stretch_mode()
+                elif event.key == pygame.K_o:
+                    self.toggle_always_open()
                 elif event.key == pygame.K_ESCAPE and self.is_fullscreen:
                     self.toggle_fullscreen()
+                # Handle arrow keys for display offset
+                elif event.key == pygame.K_LEFT:
+                    self.adjust_display_offset(dx=-5)
+                elif event.key == pygame.K_RIGHT:
+                    self.adjust_display_offset(dx=5)
+                elif event.key == pygame.K_UP:
+                    self.adjust_display_offset(dy=-5)
+                elif event.key == pygame.K_DOWN:
+                    self.adjust_display_offset(dy=5)
         return True
 
     def _get_schedule_message(self):
@@ -1259,6 +1388,112 @@ class MusicIdentifier:
 
         return schedule_text
 
+    def init_sonos(self):
+        """Initialize connection to first available Sonos speaker."""
+        try:
+            speakers = list(discover())
+            if speakers:
+                self.sonos_speaker = speakers[0]
+                self.logger.info(f"Connected to Sonos speaker: {self.sonos_speaker.player_name}")
+            else:
+                self.logger.warning("No Sonos speakers found on network")
+        except Exception as e:
+            self.logger.error(f"Error discovering Sonos speakers: {e}")
+
+    async def get_sonos_track_info(self):
+        """Get current track info from Sonos speaker."""
+        if not self.sonos_speaker:
+            return None
+            
+        current_time = time.time()
+        # Only check Sonos state based on the appropriate interval
+        if current_time - self.last_sonos_check < (
+            self.sonos_check_interval if self.sonos_is_playing 
+            else self.sonos_check_interval_paused
+        ):
+            # If we're not checking Sonos and it's not playing, return None to allow audio input
+            if not self.sonos_is_playing:
+                return None
+            # If it is playing, return the last identified song
+            return self.last_identified if hasattr(self, 'last_identified') else None
+            
+        self.last_sonos_check = current_time
+            
+        try:
+            # First check if Sonos is playing
+            transport_info = self.sonos_speaker.get_current_transport_info()
+            current_state = transport_info.get('current_transport_state', '').lower()
+            
+            # Update playing state
+            was_playing = self.sonos_is_playing
+            self.sonos_is_playing = current_state == 'playing'
+            
+            # If state changed, log it
+            if was_playing != self.sonos_is_playing:
+                self.logger.info(f"Sonos playback state changed: {current_state}")
+                if not self.sonos_is_playing:
+                    # Clear last identified when paused
+                    self.last_identified = None
+                    return None
+            
+            # Only get track info if playing
+            if self.sonos_is_playing:
+                track_info = self.sonos_speaker.get_current_track_info()
+                if track_info and track_info.get('title'):
+                    # Format track info similar to Shazam result
+                    return {
+                        'title': track_info.get('title', 'Unknown Title'),
+                        'artist': track_info.get('artist', 'Unknown Artist'),
+                        'images': {
+                            'coverart': track_info.get('album_art'),
+                            'coverarthq': track_info.get('album_art')
+                        }
+                    }
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting Sonos track info: {e}")
+            self.sonos_is_playing = False
+            return None
+
+    def load_display_config(self):
+        """Load display configuration from YAML file."""
+        try:
+            if os.path.exists(self.display_config_path):
+                with open(self.display_config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    if config and isinstance(config, dict):
+                        self.display_offset = {
+                            'x': config.get('offset_x', 0),
+                            'y': config.get('offset_y', 0)
+                        }
+                        self.logger.info(f"Loaded display config: offset_x={self.display_offset['x']}, offset_y={self.display_offset['y']}")
+        except Exception as e:
+            self.logger.error(f"Error loading display config: {e}")
+
+    def save_display_config(self):
+        """Save display configuration to YAML file."""
+        try:
+            config = {
+                'offset_x': self.display_offset['x'],
+                'offset_y': self.display_offset['y']
+            }
+            with open(self.display_config_path, 'w') as f:
+                yaml.dump(config, f, default_flow_style=False)
+            self.logger.info(f"Saved display config: {config}")
+        except Exception as e:
+            self.logger.error(f"Error saving display config: {e}")
+
+    def adjust_display_offset(self, dx=0, dy=0):
+        """Adjust the display offset and save the configuration."""
+        self.display_offset['x'] += dx
+        self.display_offset['y'] += dy
+        self.save_display_config()
+        self.logger.debug(f"Adjusted display offset to: x={self.display_offset['x']}, y={self.display_offset['y']}")
+
+    def apply_display_offset(self, x, y):
+        """Apply the display offset to given coordinates."""
+        return (x + self.display_offset['x'], y + self.display_offset['y'])
+
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description='Music Recognition App')
@@ -1266,7 +1501,6 @@ async def main():
     parser.add_argument('--list-devices', action='store_true', help='List available audio devices and exit')
     parser.add_argument('--device', type=int, help='Select input device by number')
     parser.add_argument('--fullscreen', action='store_true', help='Start in fullscreen mode')
-    parser.add_argument('--always-open', action='store_true', help='Always stay open')
     
     try:
         args = parser.parse_args()
@@ -1279,7 +1513,6 @@ async def main():
             list_devices = False
             device = None
             fullscreen = False
-            always_open = False
         args = Args()
     
     if args.list_devices:
@@ -1298,7 +1531,7 @@ async def main():
         except ValueError:
             print(f"Warning: Invalid AL_DEVICE value: {env_device}. Must be an integer.")
     
-    app = MusicIdentifier(debug_mode=args.debug, device_index=args.device, always_open=args.always_open)
+    app = MusicIdentifier(debug_mode=args.debug, device_index=args.device, always_open=False)
     if args.fullscreen:
         app.is_fullscreen = True
     await app.run()

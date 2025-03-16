@@ -156,11 +156,34 @@ debug-open:
     DEVICE=$(just select-device) || exit 1
     .venv/bin/python hello.py --debug --device "$DEVICE" --always-open
 
+# Run memory profiling and monitoring
+memtest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Starting memory monitoring..."
+    echo "Logs will be written to memory_usage.log"
+    echo "Press Ctrl+C to stop monitoring"
+    DEVICE=$(just select-device) || exit 1
+    # Set PYTHONMALLOC to help detect memory leaks
+    PYTHONMALLOC=debug .venv/bin/python memory_monitor.py --device "$DEVICE"
+
+# Run memory profiling with always-open flag
+memtest-open:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Starting memory monitoring with always-open flag..."
+    echo "Logs will be written to memory_usage.log"
+    echo "Press Ctrl+C to stop monitoring"
+    DEVICE=$(just select-device) || exit 1
+    # Set PYTHONMALLOC to help detect memory leaks
+    PYTHONMALLOC=debug .venv/bin/python memory_monitor.py --device "$DEVICE" --always-open
+
 # Clean up virtual environment and cache
 clean:
     rm -rf .venv
     rm -rf __pycache__
     rm -rf *.pyc
+    rm -f memory_usage.log
 
 # Clean up old pipx installation
 clean-pipx:
