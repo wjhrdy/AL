@@ -241,8 +241,8 @@ enable-autostart:
     tee ~/.config/systemd/user/al.service > /dev/null << EOL
     [Unit]
     Description=AL Music Recognition
-    After=graphical-session.target
-    PartOf=graphical-session.target
+    After=graphical.target
+    Wants=graphical.target
 
     [Service]
     Type=simple
@@ -255,9 +255,10 @@ enable-autostart:
 
     Restart=always
     RestartSec=10
+    RemainAfterExit=no
 
     [Install]
-    WantedBy=graphical-session.target
+    WantedBy=default.target
     EOL
     
     # Enable lingering for the user (allows user services to run without login)

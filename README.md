@@ -1,23 +1,24 @@
-# Real-Time Music Recognition with CRT Display
+# AL - Sonos Music Display
 
-A real-time music recognition application optimized for CRT displays, featuring automatic song identification, album art display, and smooth text scrolling effects.
+A music display application for Sonos speakers, optimized for CRT displays. Shows currently playing track info and album art from your Sonos system with smooth text scrolling effects.
 
 ## Features
 
-- **Real-time Music Recognition**: Continuously listens to ambient audio and identifies songs using the Shazam API
+- **Sonos Integration**: Automatically detects and displays currently playing track from your Sonos speaker
 - **CRT Display Optimization**: 
   - Stretch mode ('s' key) for proper 4:3 display on CRT monitors
   - Fullscreen toggle ('f' key)
   - Smooth text scrolling for long titles
 - **Visual Elements**:
-  - Dynamic album art display
+  - Dynamic album art display with caching
   - High-contrast text with outlines for better visibility
   - Smooth fade transitions
   - Auto-scrolling for long song titles
+  - Mouse cursor auto-hidden in fullscreen
+- **Schedule Display**: Configurable operating hours shown on screen
+- **Remote Config**: Optional config updates from a GitHub Gist
 
 ## Installation
-
-The installation process will automatically detect your operating system and install all necessary dependencies:
 
 ```bash
 # Clone the repository
@@ -38,12 +39,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | sudo bash
 just install
 ```
 
-This will automatically:
-- Install system-specific dependencies (portaudio, pygame)
-- Set up Python environment with uv package manager
-- Create a virtual environment
-- Install all required Python packages
-
 ## Raspberry Pi Setup Guide
 
 ### 1. Initial Raspberry Pi Setup
@@ -53,7 +48,6 @@ This will automatically:
    - Power supply
    - Keyboard and mouse
    - Display (CRT or other monitor)
-   - Audio input device (USB microphone or similar)
 4. Boot up your Raspberry Pi and complete the initial setup wizard
 
 ### 2. System Configuration
@@ -68,11 +62,11 @@ This will automatically:
    sudo raspi-config
    ```
    - Navigate to "Interface Options"
-   - Enable: SSH, Audio
+   - Enable: SSH
 
 3. Install required system packages:
    ```bash
-   sudo apt install -y git python3-pip python3-venv portaudio19-dev
+   sudo apt install -y git python3-pip python3-venv
 
 ### 3. Install Just Command Runner
 1. Download and install Just:
@@ -136,7 +130,8 @@ To make the application run automatically when your Raspberry Pi boots up:
 2. Controls:
     - Press 'f' to toggle fullscreen mode
     - Press 's' to toggle stretch mode (for 4:3 CRT displays)
-    - Press 'q' to quit the application
+    - Press 'o' to toggle always-open mode (bypass schedule)
+    - Arrow keys to adjust display offset
 
 ## Display Configuration
 
@@ -168,19 +163,12 @@ To make the application run automatically when your Raspberry Pi boots up:
 
 ## Troubleshooting
 
-### Audio Issues
-1. Check audio input:
+### Sonos Issues
+1. Ensure your Raspberry Pi is on the same network as your Sonos speakers
+2. Check that Sonos speakers are discoverable — the app auto-connects to the first speaker found
+3. Run in debug mode for detailed logging:
    ```bash
-   arecord -l
-   ```
-2. Test microphone:
-   ```bash
-   arecord -d 5 test.wav  # Records 5 seconds
-   aplay test.wav         # Plays recording
-   ```
-3. Verify microphone permissions:
-   ```bash
-   sudo usermod -a -G audio $USER
+   just debug
    ```
 
 ### Display Issues
