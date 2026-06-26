@@ -16,6 +16,7 @@ A music display application for Sonos speakers, optimized for CRT displays. Show
   - Auto-scrolling for long song titles
   - Mouse cursor auto-hidden in fullscreen
 - **Schedule Display**: Configurable operating hours shown on screen
+- **Text Interrupts**: Configurable announcements rotate with the operating-hours display cadence
 - **Remote Config**: Optional config updates from a GitHub Gist
 
 ## Installation
@@ -134,6 +135,24 @@ To make the application run automatically when your Raspberry Pi boots up:
     - Arrow keys to adjust display offset
 
 ## Display Configuration
+
+### Text Interrupts and Announcements
+Operating hours appear as a timed text interrupt. Add any number of announcement
+interrupts in `config.yaml` under `display.announcements`; they rotate on the
+same cadence as the hours display.
+
+```yaml
+display:
+  schedule_interval: 60
+  schedule_duration: 10
+  announcements:
+    - title: Announcement
+      message: "Welcome in."
+    - title: Reminder
+      lines:
+        - "Ask about today's specials."
+        - "Thanks for listening."
+```
 
 ### For CRT Displays
 1. Connect your CRT display to the Raspberry Pi using appropriate adapters

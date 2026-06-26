@@ -23,6 +23,15 @@ display:
   off_hours_message: "Currently closed. Our business hours are Monday-Friday, 9 AM - 5 PM."
   schedule_header: Operating Hours
   schedule_time_format: "{open} - {close}"  # Format for displaying time ranges
+  schedule_interval: 60  # Shared cadence for hours and announcement interrupts
+  schedule_duration: 10  # Shared display duration for hours and announcement interrupts
+  announcements:
+    - title: Announcement
+      message: "Welcome in."
+    - title: Reminder
+      lines:
+        - "Ask about today's specials."
+        - "Thanks for listening."
 
 remote:
   enabled: false  # Set to true to enable remote config

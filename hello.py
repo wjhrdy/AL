@@ -89,10 +89,13 @@ class MusicIdentifier:
         self.current_background = None
         self.permanent_schedule = False
 
-        # Schedule display timing
-        self.last_schedule_display = 0
-        self.schedule_showing = False
-        self.schedule_show_start = 0
+        # Text interrupt timing. The schedule is one interrupt; configured
+        # announcements are additional interrupts on the same cadence.
+        self.last_text_interrupt_display = 0
+        self.text_interrupt_showing = False
+        self.text_interrupt_show_start = 0
+        self.active_text_interrupt = None
+        self.text_interrupt_index = 0
 
         # Screensaver state
         self.screensaver_pos = [100, 100]
@@ -245,18 +248,145 @@ class MusicIdentifier:
             visible_surface.set_alpha(int(alpha * 255))
             self.screen.blit(visible_surface, ((screen_width - max_width) // 2, y_pos))
 
-    def _should_show_schedule(self, current_time):
-        """Determine if the schedule should be shown based on timing and state."""
-        if self.schedule_showing:
-            schedule_duration = self.config.get('display', {}).get('schedule_duration', 10)
-            return current_time - self.schedule_show_start < schedule_duration
+    def _config_number(self, value, default, config_key):
+        """Parse a numeric config value with a safe fallback."""
+        if value is None:
+            return default
 
-        schedule_interval = self.config.get('display', {}).get('schedule_interval', 60)
+        try:
+            parsed_value = float(value)
+        except (TypeError, ValueError):
+            self.logger.warning(f"Invalid {config_key} value: {value!r}; using {default}")
+            return default
+
+        if parsed_value < 0:
+            self.logger.warning(f"Invalid {config_key} value: {value!r}; using {default}")
+            return default
+
+        return parsed_value
+
+    def _get_text_interrupt_interval(self):
+        """Get the shared interval for schedule and announcement interrupts."""
+        display_config = self.config.get('display', {})
+        interval = display_config.get('text_interrupt_interval')
+        if interval is None:
+            interval = display_config.get('schedule_interval', 60)
+
+        interval = self._config_number(interval, 60, 'text_interrupt_interval')
 
         if not self.last_identified:
-            schedule_interval = min(schedule_interval, 10)
+            interval = min(interval, 10)
 
-        return current_time - self.last_schedule_display >= schedule_interval
+        return interval
+
+    def _get_text_interrupt_duration(self, interrupt=None):
+        """Get the display duration for text interrupts."""
+        if interrupt and interrupt.get('duration') is not None:
+            return self._config_number(interrupt['duration'], 10, 'announcement.duration')
+
+        display_config = self.config.get('display', {})
+        duration = display_config.get('text_interrupt_duration')
+        if duration is None:
+            duration = display_config.get('schedule_duration', 10)
+
+        return self._config_number(duration, 10, 'text_interrupt_duration')
+
+    def _get_configured_announcements(self):
+        """Return configured announcement interrupts."""
+        display_config = self.config.get('display', {})
+        announcements = display_config.get('announcements', [])
+        if not isinstance(announcements, list):
+            self.logger.warning("display.announcements must be a list")
+            return []
+
+        configured_announcements = []
+
+        for i, announcement in enumerate(announcements):
+            if isinstance(announcement, str):
+                title = display_config.get('announcement_header', 'Announcement')
+                lines = announcement.splitlines() or [announcement]
+                duration = None
+                enabled = True
+            elif isinstance(announcement, dict):
+                enabled = announcement.get('enabled', True)
+                title = (
+                    announcement.get('title') or
+                    announcement.get('header') or
+                    display_config.get('announcement_header', 'Announcement')
+                )
+                duration = announcement.get('duration')
+
+                if isinstance(announcement.get('lines'), list):
+                    lines = [str(line) for line in announcement['lines']]
+                else:
+                    message = (
+                        announcement.get('message') or
+                        announcement.get('text') or
+                        announcement.get('body') or
+                        ''
+                    )
+                    lines = str(message).splitlines() if message else []
+            else:
+                self.logger.warning(f"Skipping invalid announcement at index {i}")
+                continue
+
+            if not enabled:
+                continue
+
+            lines = [line for line in lines if str(line).strip()]
+            if not title and not lines:
+                continue
+
+            configured_announcements.append({
+                'type': 'announcement',
+                'title': str(title) if title else '',
+                'lines': lines,
+                'duration': duration
+            })
+
+        return configured_announcements
+
+    def _get_text_interrupts(self):
+        """Get the ordered list of text interrupts to rotate through."""
+        interrupts = []
+
+        if self.config and 'schedule' in self.config:
+            interrupts.append({
+                'type': 'schedule',
+                'message': self._get_schedule_message()
+            })
+
+        interrupts.extend(self._get_configured_announcements())
+        return interrupts
+
+    def _should_show_text_interrupt(self, current_time):
+        """Determine if a text interrupt should be shown based on timing."""
+        if self.text_interrupt_showing:
+            duration = self._get_text_interrupt_duration(self.active_text_interrupt)
+            return current_time - self.text_interrupt_show_start < duration
+
+        return current_time - self.last_text_interrupt_display >= self._get_text_interrupt_interval()
+
+    def _start_next_text_interrupt(self, current_time):
+        """Start the next text interrupt in the rotation."""
+        interrupts = self._get_text_interrupts()
+        if not interrupts:
+            self.active_text_interrupt = None
+            self.text_interrupt_showing = False
+            self.last_text_interrupt_display = current_time
+            return False
+
+        self.active_text_interrupt = interrupts[self.text_interrupt_index % len(interrupts)]
+        self.text_interrupt_index = (self.text_interrupt_index + 1) % len(interrupts)
+        self.text_interrupt_showing = True
+        self.text_interrupt_show_start = current_time
+        self.last_text_interrupt_display = current_time
+        return True
+
+    def _stop_text_interrupt(self):
+        """Stop the active text interrupt."""
+        self.text_interrupt_showing = False
+        self.active_text_interrupt = None
 
     def wrap_text(self, text, font, max_width):
         """Wrap text to fit within a given width."""
@@ -284,6 +414,143 @@ class MusicIdentifier:
 
         return lines
 
+    def draw_schedule_interrupt(self, screen_width, screen_height, interrupt=None):
+        """Draw the configured operating hours interrupt."""
+        schedule_text = (interrupt or {}).get('message') or self._get_schedule_message()
+        lines = schedule_text.split('\n')
+
+        is_outside_hours = not self._is_within_operating_hours()
+
+        size_multiplier = 0.75 if is_outside_hours else 1.0
+        header_font_size = min(int(screen_height * 0.13 * size_multiplier), int(72 * size_multiplier))
+        schedule_font_size = min(int(screen_height * 0.09 * size_multiplier), int(48 * size_multiplier))
+
+        rendered_lines = []
+        total_height = 0
+
+        for i, line in enumerate(lines):
+            if not line.strip():
+                continue
+
+            font_size = header_font_size if i == 0 else schedule_font_size
+            font = pygame.font.Font(None, font_size)
+
+            text_surface = self.render_text_with_outline(
+                line.strip(),
+                font,
+                (255, 255, 255),
+                (0, 0, 0),
+                3 if not is_outside_hours else 2
+            )
+
+            rendered_lines.append(text_surface)
+            total_height += text_surface.get_height()
+
+            if i < len(lines) - 1:
+                total_height += int(screen_height * (0.02 if not is_outside_hours else 0.015))
+
+        vertical_shift = int(screen_height * 0.15) if is_outside_hours else 0
+        _, base_y = self.apply_display_offset(0, (screen_height - total_height) // 2 - vertical_shift)
+        current_y = base_y
+
+        for text_surface in rendered_lines:
+            x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+            text_rect = text_surface.get_rect(
+                centerx=x_pos,
+                top=current_y
+            )
+            self.screen.blit(text_surface, text_rect)
+            current_y += text_surface.get_height() + int(screen_height * (0.02 if not is_outside_hours else 0.015))
+
+        if is_outside_hours:
+            message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
+            font = pygame.font.Font(None, 48)
+
+            max_width = int(screen_width * 0.7)
+            wrapped_lines = self.wrap_text(message, font, max_width)
+
+            line_height = font.get_linesize()
+            total_height = len(wrapped_lines) * line_height
+
+            rendered_lines = []
+            for line in wrapped_lines:
+                text_surface = self.render_text_with_outline(
+                    line,
+                    font,
+                    (255, 0, 0),
+                    (0, 0, 0),
+                    3
+                )
+                rendered_lines.append(text_surface)
+
+            bottom_padding = int(screen_height * 0.05)
+            start_y = screen_height - bottom_padding - total_height
+
+            current_y = start_y
+            for text_surface in rendered_lines:
+                x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+                text_rect = text_surface.get_rect(
+                    centerx=x_pos,
+                    top=current_y
+                )
+                self.screen.blit(text_surface, text_rect)
+                current_y += line_height
+
+    def draw_announcement_interrupt(self, screen_width, screen_height, interrupt):
+        """Draw a configured text announcement interrupt."""
+        title = interrupt.get('title', '')
+        lines = interrupt.get('lines', [])
+        max_width = int(screen_width * 0.75)
+
+        title_font = pygame.font.Font(None, min(int(screen_height * 0.13), 72))
+        body_font = pygame.font.Font(None, min(int(screen_height * 0.09), 48))
+
+        text_lines = []
+        if title:
+            text_lines.append((title, title_font, 3))
+
+        for line in lines:
+            wrapped_lines = self.wrap_text(str(line), body_font, max_width)
+            for wrapped_line in wrapped_lines:
+                text_lines.append((wrapped_line, body_font, 2))
+
+        rendered_lines = []
+        total_height = 0
+        line_gap = int(screen_height * 0.025)
+
+        for text, font, outline_width in text_lines:
+            text_surface = self.render_text_with_outline(
+                text,
+                font,
+                (255, 255, 255),
+                (0, 0, 0),
+                outline_width
+            )
+            rendered_lines.append(text_surface)
+            total_height += text_surface.get_height()
+
+        if rendered_lines:
+            total_height += line_gap * (len(rendered_lines) - 1)
+
+        _, base_y = self.apply_display_offset(0, (screen_height - total_height) // 2)
+        current_y = base_y
+
+        for text_surface in rendered_lines:
+            x_pos, _ = self.apply_display_offset(screen_width//2, 0)
+            text_rect = text_surface.get_rect(
+                centerx=x_pos,
+                top=current_y
+            )
+            self.screen.blit(text_surface, text_rect)
+            current_y += text_surface.get_height() + line_gap
+
+    def draw_text_interrupt(self, screen_width, screen_height, interrupt):
+        """Draw the active text interrupt."""
+        if interrupt.get('type') == 'announcement':
+            self.draw_announcement_interrupt(screen_width, screen_height, interrupt)
+        else:
+            self.draw_schedule_interrupt(screen_width, screen_height, interrupt)
+
     def draw_window(self):
         """Draw the window contents."""
         if not pygame.display.get_init():
@@ -296,15 +563,15 @@ class MusicIdentifier:
 
         current_time = time.time()
 
-        if self._should_show_schedule(current_time):
-            if not self.schedule_showing:
-                self.schedule_showing = True
-                self.schedule_show_start = current_time
-                self.last_schedule_display = current_time
+        if self._should_show_text_interrupt(current_time):
+            if not self.text_interrupt_showing:
+                self._start_next_text_interrupt(current_time)
         else:
-            self.schedule_showing = False
+            self._stop_text_interrupt()
 
-        if self.current_background is not None and not self.schedule_showing:
+        text_interrupt_showing = self.text_interrupt_showing and self.active_text_interrupt
+
+        if self.current_background is not None and not text_interrupt_showing:
             img_width = self.current_background.get_width()
             img_height = self.current_background.get_height()
 
@@ -332,7 +599,7 @@ class MusicIdentifier:
             )
             self.screen.blit(scaled_surface, (x_pos, y_pos))
 
-        if self.last_identified and self.last_song_time and not self.schedule_showing:
+        if self.last_identified and self.last_song_time and not text_interrupt_showing:
             current_time = time.time()
             elapsed_time = current_time - self.last_song_time
 
@@ -382,88 +649,10 @@ class MusicIdentifier:
                 temp_surface.set_alpha(int(alpha))
                 self.screen.blit(temp_surface, artist_rect)
 
-        if self.schedule_showing or not self.last_identified:
-            schedule_text = self._get_schedule_message()
-            lines = schedule_text.split('\n')
-
-            is_outside_hours = not self._is_within_operating_hours()
-
-            size_multiplier = 0.75 if is_outside_hours else 1.0
-            header_font_size = min(int(screen_height * 0.13 * size_multiplier), int(72 * size_multiplier))
-            schedule_font_size = min(int(screen_height * 0.09 * size_multiplier), int(48 * size_multiplier))
-
-            rendered_lines = []
-            total_height = 0
-            max_width = 0
-
-            for i, line in enumerate(lines):
-                if not line.strip():
-                    continue
-
-                font_size = header_font_size if i == 0 else schedule_font_size
-                font = pygame.font.Font(None, font_size)
-
-                text_surface = self.render_text_with_outline(
-                    line.strip(),
-                    font,
-                    (255, 255, 255),
-                    (0, 0, 0),
-                    3 if not is_outside_hours else 2
-                )
-
-                rendered_lines.append(text_surface)
-                total_height += text_surface.get_height()
-                max_width = max(max_width, text_surface.get_width())
-
-                if i < len(lines) - 1:
-                    total_height += int(screen_height * (0.02 if not is_outside_hours else 0.015))
-
-            vertical_shift = int(screen_height * 0.15) if is_outside_hours else 0
-            _, base_y = self.apply_display_offset(0, (screen_height - total_height) // 2 - vertical_shift)
-            current_y = base_y
-
-            for text_surface in rendered_lines:
-                x_pos, _ = self.apply_display_offset(screen_width//2, 0)
-                text_rect = text_surface.get_rect(
-                    centerx=x_pos,
-                    top=current_y
-                )
-                self.screen.blit(text_surface, text_rect)
-                current_y += text_surface.get_height() + int(screen_height * (0.02 if not is_outside_hours else 0.015))
-
-            if is_outside_hours:
-                message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-                font = pygame.font.Font(None, 48)
-
-                max_width = int(screen_width * 0.7)
-                wrapped_lines = self.wrap_text(message, font, max_width)
-
-                line_height = font.get_linesize()
-                total_height = len(wrapped_lines) * line_height
-
-                rendered_lines = []
-                for line in wrapped_lines:
-                    text_surface = self.render_text_with_outline(
-                        line,
-                        font,
-                        (255, 0, 0),
-                        (0, 0, 0),
-                        3
-                    )
-                    rendered_lines.append(text_surface)
-
-                bottom_padding = int(screen_height * 0.05)
-                start_y = screen_height - bottom_padding - total_height
-
-                current_y = start_y
-                for text_surface in rendered_lines:
-                    x_pos, _ = self.apply_display_offset(screen_width//2, 0)
-                    text_rect = text_surface.get_rect(
-                        centerx=x_pos,
-                        top=current_y
-                    )
-                    self.screen.blit(text_surface, text_rect)
-                    current_y += line_height
+        if text_interrupt_showing:
+            self.draw_text_interrupt(screen_width, screen_height, self.active_text_interrupt)
+        elif not self.last_identified:
+            self.draw_schedule_interrupt(screen_width, screen_height)
 
         self.draw_notification()
 
