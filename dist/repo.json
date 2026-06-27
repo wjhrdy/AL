@@ -1,0 +1,57 @@
+{
+  "imager": {
+    "latest_version": "1.8.5",
+    "url": "https://www.raspberrypi.com/software/",
+    "devices": [
+      {
+        "name": "No filtering",
+        "tags": ["all"],
+        "default": true,
+        "matching_type": "inclusive",
+        "description": "Show every AL image."
+      },
+      {
+        "name": "Raspberry Pi 5",
+        "tags": ["pi5"],
+        "matching_type": "inclusive",
+        "description": "Raspberry Pi 5 / 5B"
+      },
+      {
+        "name": "Raspberry Pi 4 / 400",
+        "tags": ["pi4", "pi400"],
+        "matching_type": "inclusive",
+        "description": "Raspberry Pi 4 Model B and Raspberry Pi 400 (reference device)."
+      },
+      {
+        "name": "Raspberry Pi 3",
+        "tags": ["pi3"],
+        "matching_type": "inclusive",
+        "description": "Raspberry Pi 3 Model B / B+."
+      }
+    ]
+  },
+  "os_list": [
+    {
+      "name": "AL Display",
+      "description": "Sonos now-playing + schedule/announcement display for a small screen, with a web config app.",
+      "icon": "https://raw.githubusercontent.com/wjhrdy/AL/main/dist/assets/icon.png",
+      "subitems": [
+        {
+          "name": "AL Display (Raspberry Pi OS Bookworm 64-bit)",
+          "description": "Raspberry Pi OS with the AL display app, all dependencies, display config, and auto-start service pre-installed. Boots to the now-playing display and shows a QR code to the web config app.",
+          "url": "https://github.com/wjhrdy/AL/releases/latest/download/AL_arm64.img.xz",
+          "release_date": "2026-06-27",
+          "devices": ["pi5", "pi4", "pi400", "pi3", "all"],
+          "capabilities": ["usb_otg"],
+          "init_format": "cloudinit-rpi",
+          "image_download_size": 0,
+          "image_download_sha256": "",
+          "icon": "https://raw.githubusercontent.com/wjhrdy/AL/main/dist/assets/icon.png",
+          "website": "https://github.com/wjhrdy/AL",
+          "extract_size": 0,
+          "extract_sha256": ""
+        }
+      ]
+    }
+  ]
+}

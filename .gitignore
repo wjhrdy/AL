@@ -10,7 +10,14 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+# dist/ holds the Raspberry Pi Imager custom OS list (committed); ignore only
+# Python build artifacts within it.
+/dist/*
+!/dist/repo.json
+!/dist/gen_repo_json.py
+!/dist/build-image-install.sh
+!/dist/README.md
+!/dist/assets
 downloads/
 eggs/
 .eggs/
@@ -179,3 +186,7 @@ cache/
 
 # Favicon / web manifest assets (generated, not tracked)
 /static/
+
+# Pi setup secrets
+pi-setup/firstrun.env
+pi-setup/custom.local.toml

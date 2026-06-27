@@ -1,0 +1,83 @@
+name: Build Pi image
+
+# Builds a Raspberry Pi OS image with AL pre-installed, publishes it to a GitHub
+# Release, and updates dist/repo.json (the Raspberry Pi Imager custom OS list)
+# with the real download URL + checksums.
+#
+# Trigger by pushing a tag like v1.0.0, or run manually.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && TAG="${{ github.event.inputs.tag }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "date=$(date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Build AL image
+        id: build
+        uses: pguyot/arm-runner-action@v2
+        with:
+          base_image: raspios_lite_arm64:latest
+          image_additional_mb: 2048
+          # Grow then shrink so the published image is small.
+          shrink_image: true
+          commands: |
+            chmod +x dist/build-image-install.sh
+            dist/build-image-install.sh
+
+      - name: Compress image
+        id: pack
+        run: |
+          IMG="${{ steps.build.outputs.image }}"
+          OUT="AL_arm64.img"
+          mv "$IMG" "$OUT"
+          xz -T0 -6 -k "$OUT"            # keep both .img and .img.xz
+          ls -la AL_arm64.img*
+
+      - name: Update repo.json with checksums
+        run: |
+          python3 dist/gen_repo_json.py \
+            --img AL_arm64.img --xz AL_arm64.img.xz \
+            --repo "${{ github.repository }}" --tag "${{ steps.meta.outputs.tag }}" \
+            --date "${{ steps.meta.outputs.date }}"
+          cat dist/repo.json
+
+      - name: Commit updated repo.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          cp dist/repo.json /tmp/repo.json
+          git stash -u || true
+          cp /tmp/repo.json dist/repo.json
+          git add dist/repo.json
+          git commit -m "Update Imager repo.json for ${{ steps.meta.outputs.tag }}" || echo "no changes"
+          git push origin main || echo "push skipped"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          files: |
+            AL_arm64.img.xz
+            dist/repo.json
