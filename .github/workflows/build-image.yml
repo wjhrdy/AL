@@ -70,10 +70,21 @@ jobs:
             dist/repo.json
 
       # Done after publishing so the (untracked) image artifact is never disturbed.
+      # Re-base onto the latest main before committing: a long build means main
+      # may have moved (docs, other releases), so a plain push would be rejected.
       - name: Commit updated repo.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add dist/repo.json
-          git commit -m "Update Imager repo.json for ${{ steps.meta.outputs.tag }}" || { echo "no changes"; exit 0; }
-          git push origin HEAD:main
+          cp dist/repo.json /tmp/repo.json
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git checkout -B main origin/main
+            cp /tmp/repo.json dist/repo.json
+            if git diff --quiet -- dist/repo.json; then echo "no changes"; exit 0; fi
+            git add dist/repo.json
+            git commit -m "Update Imager repo.json for ${{ steps.meta.outputs.tag }}"
+            if git push origin main; then exit 0; fi
+            echo "push rejected (main moved); retry $attempt"
+          done
+          echo "::error::could not push repo.json after retries"; exit 1
