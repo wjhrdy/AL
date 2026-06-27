@@ -167,3 +167,15 @@ config.yaml
 config.yaml.bak
 
 cache/
+
+# Custom fonts — drop your own font files here; they are never committed.
+# Configure which one to use via display.font in config.yaml.
+/fonts/*
+!/fonts/.gitkeep
+
+# Uploaded announcement images (device-local, not committed)
+/announcements/*
+!/announcements/.gitkeep
+
+# Favicon / web manifest assets (generated, not tracked)
+/static/

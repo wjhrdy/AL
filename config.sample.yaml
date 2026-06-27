@@ -23,6 +23,7 @@ display:
   off_hours_message: "Currently closed. Our business hours are Monday-Friday, 9 AM - 5 PM."
   schedule_header: Operating Hours
   schedule_time_format: "{open} - {close}"  # Format for displaying time ranges
+  font: ""  # Optional: filename of a custom font placed in the gitignored fonts/ folder (e.g. KlangMT.ttf); blank = Pygame default
   schedule_interval: 60  # Shared cadence for hours and announcement interrupts
   schedule_duration: 10  # Shared display duration for hours and announcement interrupts
   announcements:
@@ -37,3 +38,5 @@ remote:
   enabled: false  # Set to true to enable remote config
   url: ""  # GitLab Gist URL (e.g., https://gist.githubusercontent.com/user/gist_id)
   update_interval: 3600  # Update interval in seconds (default: 1 hour)
+  # To avoid GitHub API rate limiting (60 req/hr unauthenticated), set a personal
+  # access token as GITHUB_TOKEN in your .env file (see .env.sample).

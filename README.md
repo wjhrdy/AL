@@ -154,6 +154,58 @@ display:
         - "Thanks for listening."
 ```
 
+### Custom Fonts
+Drop any `.ttf`/`.otf` font file into the `fonts/` folder and point `display.font`
+at its filename in `config.yaml`:
+
+```yaml
+display:
+  font: KlangMT.ttf  # file lives at fonts/KlangMT.ttf
+```
+
+The `fonts/` folder is gitignored, so your custom fonts are never committed to the
+repo. Leave `font` blank (or omit it) to use the default Pygame font.
+
+### Remote Config & GitHub Rate Limiting
+When `remote.enabled` is set, the app periodically fetches `config.yaml` from a
+GitHub Gist. Unauthenticated GitHub API requests are capped at 60/hour, which is
+easy to hit on a short `update_interval`. To raise the limit to 5000/hour, add a
+personal access token to your `.env` file:
+
+```bash
+GITHUB_TOKEN=ghp_your_token_here
+```
+
+A fine-grained token with read-only **Gists** access (or a classic token with the
+`gist` scope) is enough. The token is read from the environment only and is never
+written to any config file.
+
+### Configure from a Phone or Tablet (Web App)
+The app serves a config editor on the local network, so the display can be
+configured without editing YAML. On a device on the same Wi-Fi, open
+`http://<pi-ip>:8080` (e.g. `http://192.168.0.153:8080`). The editor lets you set:
+
+- **Weekly hours** — toggle each day open/closed and pick open/close times.
+- **Messages** — the schedule header and the closed (off-hours) message.
+- **Announcements** — add/edit/remove rotating announcements. Each can be text
+  (title + message), an **uploaded image**, or both — when an image has a
+  title/message, the text is shown above it. Images are zoomed to fit the display
+  (aspect ratio preserved) and honor EXIF orientation, so portrait phone photos
+  stay upright. Announcements rotate on a shared cadence; images are stored in the
+  gitignored `announcements/` folder.
+- **Advanced timing** — rotation interval and on-screen duration.
+
+Tap **Save** and the changes are written to `config.yaml` and applied live — no
+restart needed (a `display.font` change is the exception; the font loads once at
+startup). The editor preserves settings it doesn't manage (font, remote section,
+time format). `config.yaml` is backed up to `config.yaml.bak` on each save. Set
+`AL_WEB_PORT` in `.env` to change the port. Tip: add the page to the home screen
+for one-tap access.
+
+> The web app is the source of truth for configuration. If you instead want to
+> manage config from a shared GitHub Gist, set `remote.enabled: true` (see below);
+> note the two approaches conflict, since the gist poll overwrites local edits.
+
 ### For CRT Displays
 1. Connect your CRT display to the Raspberry Pi using appropriate adapters
    - For composite or S-Video output, you can use [this HDMI to Composite/S-Video adapter](https://www.amazon.com/TIXILINBI-Converter-Composite-S-Video-Adpater/dp/B0C7GGKWZZ)

@@ -7,8 +7,16 @@ import sys
 import logging
 from datetime import datetime, time as dt_time
 import os
+import re
+import copy
+import uuid
 import aiohttp
 import hashlib
+try:
+    from PIL import Image as PILImage, ImageOps as PILImageOps
+except ImportError:  # Pillow optional: without it, images load via pygame (no EXIF rotation)
+    PILImage = None
+    PILImageOps = None
 import yaml
 import threading
 from soco import discover
@@ -64,6 +72,7 @@ class MusicIdentifier:
         self.screen_height = 600
         self.screen = None
         self.font = None
+        self._font_path = self._find_font()
         self.is_fullscreen = False
         self.is_stretched = False
 
@@ -104,9 +113,41 @@ class MusicIdentifier:
         self.screensaver_color = (255, 255, 255)
         self.screensaver_color_direction = [1, 1, 1]
 
+        # Cache of loaded announcement images, keyed by path -> (mtime, surface)
+        self._announcement_image_cache = {}
+
         # Initialize Sonos discovery
         self.sonos_speaker = None
         self.init_sonos()
+
+    def _find_font(self):
+        """Locate a custom font from the gitignored fonts/ folder.
+
+        The font filename is set via ``display.font`` in the config. Custom font
+        files live in ``fonts/`` (gitignored) so they are never committed to the
+        repo. Returns None to fall back to the Pygame default font.
+        """
+        fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+        os.makedirs(fonts_dir, exist_ok=True)
+
+        font_name = self.config.get('display', {}).get('font')
+        if not font_name:
+            self.logger.info("No custom font configured (display.font); using Pygame default")
+            return None
+
+        font_path = os.path.join(fonts_dir, font_name)
+        if os.path.exists(font_path):
+            self.logger.info(f"Using custom font: {font_path}")
+            return font_path
+
+        self.logger.warning(
+            f"Configured font '{font_name}' not found in {fonts_dir}; "
+            "falling back to Pygame default"
+        )
+        return None
+
+    def _make_font(self, size):
+        return pygame.font.Font(self._font_path, size)
 
     def _load_config(self):
         """Load the configuration from YAML file."""
@@ -309,6 +350,40 @@ class MusicIdentifier:
                 enabled = True
             elif isinstance(announcement, dict):
                 enabled = announcement.get('enabled', True)
+                if not enabled:
+                    continue
+
+                # Image announcements: shown full-screen, fit to the display, on
+                # the same rotation cadence as text announcements.
+                image_name = announcement.get('image')
+                if image_name:
+                    image_path = self._resolve_announcement_image(image_name)
+                    if not image_path:
+                        self.logger.warning(f"Announcement image not found: {image_name}")
+                        continue
+
+                    image_title = announcement.get('title') or announcement.get('header') or ''
+                    if isinstance(announcement.get('lines'), list):
+                        image_lines = [str(line) for line in announcement['lines']]
+                    else:
+                        image_message = (
+                            announcement.get('message') or
+                            announcement.get('text') or
+                            announcement.get('body') or
+                            ''
+                        )
+                        image_lines = str(image_message).splitlines() if image_message else []
+                    image_lines = [line for line in image_lines if str(line).strip()]
+
+                    configured_announcements.append({
+                        'type': 'image',
+                        'image': image_path,
+                        'title': str(image_title) if image_title else '',
+                        'lines': image_lines,
+                        'duration': announcement.get('duration'),
+                    })
+                    continue
+
                 title = (
                     announcement.get('title') or
                     announcement.get('header') or
@@ -433,7 +508,7 @@ class MusicIdentifier:
                 continue
 
             font_size = header_font_size if i == 0 else schedule_font_size
-            font = pygame.font.Font(None, font_size)
+            font = self._make_font(font_size)
 
             text_surface = self.render_text_with_outline(
                 line.strip(),
@@ -464,7 +539,7 @@ class MusicIdentifier:
 
         if is_outside_hours:
             message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
-            font = pygame.font.Font(None, 48)
+            font = self._make_font(48)
 
             max_width = int(screen_width * 0.7)
             wrapped_lines = self.wrap_text(message, font, max_width)
@@ -496,14 +571,125 @@ class MusicIdentifier:
                 self.screen.blit(text_surface, text_rect)
                 current_y += line_height
 
+    def _announcements_dir(self):
+        """Folder holding uploaded announcement images (gitignored, device-local)."""
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'announcements')
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _resolve_announcement_image(self, name):
+        """Resolve an announcement image filename to an existing path, or None."""
+        if not name:
+            return None
+        path = os.path.join(self._announcements_dir(), os.path.basename(str(name)))
+        return path if os.path.exists(path) else None
+
+    def _load_announcement_image(self, path):
+        """Load (and cache by mtime) an announcement image as a pygame surface."""
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return None
+        cached = self._announcement_image_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        surface = self._load_image_surface(path)
+        if surface is None:
+            return None
+        self._announcement_image_cache[path] = (mtime, surface)
+        return surface
+
+    def _load_image_surface(self, path):
+        """Load an image as a pygame surface, honoring EXIF orientation when possible.
+
+        Phone photos store rotation in EXIF metadata that pygame ignores (so a
+        portrait photo shows sideways). Pillow's exif_transpose applies it; if
+        Pillow is unavailable we fall back to pygame's loader.
+        """
+        if PILImage is not None:
+            try:
+                with PILImage.open(path) as img:
+                    img = PILImageOps.exif_transpose(img)
+                    img = img.convert('RGBA')
+                    return pygame.image.fromstring(img.tobytes(), img.size, 'RGBA').convert_alpha()
+            except Exception as e:
+                self.logger.warning(f"Pillow could not load {path} ({e}); using pygame loader")
+        try:
+            return pygame.image.load(path).convert_alpha()
+        except Exception as e:
+            self.logger.error(f"Failed to load announcement image {path}: {e}")
+            return None
+
+    def draw_image_interrupt(self, screen_width, screen_height, interrupt):
+        """Draw an image announcement: any title/message text on top, with the
+        image zoomed to fit the remaining space below (aspect ratio preserved)."""
+        surface = self._load_announcement_image(interrupt.get('image'))
+        if surface is None:
+            return
+
+        # Render any title/message above the image.
+        title = interrupt.get('title', '')
+        lines = interrupt.get('lines', [])
+        top_padding = int(screen_height * 0.04)
+        line_gap = int(screen_height * 0.015)
+        text_surfaces = []
+
+        if title or lines:
+            max_text_width = int(screen_width * 0.9)
+            title_font = self._make_font(min(int(screen_height * 0.10), 60))
+            body_font = self._make_font(min(int(screen_height * 0.07), 40))
+            if title:
+                text_surfaces.append(
+                    self.render_text_with_outline(str(title), title_font, (255, 255, 255), (0, 0, 0), 3))
+            for line in lines:
+                for wrapped in self.wrap_text(str(line), body_font, max_text_width):
+                    text_surfaces.append(
+                        self.render_text_with_outline(wrapped, body_font, (255, 255, 255), (0, 0, 0), 2))
+
+        current_y = top_padding
+        for text_surface in text_surfaces:
+            x_pos, _ = self.apply_display_offset(screen_width // 2, 0)
+            rect = text_surface.get_rect(centerx=x_pos, top=current_y)
+            self.screen.blit(text_surface, rect)
+            current_y += text_surface.get_height() + line_gap
+
+        # Compute the area available for the image (below the text, if any).
+        if text_surfaces:
+            text_block_height = sum(s.get_height() for s in text_surfaces) + line_gap * (len(text_surfaces) - 1)
+            gap_below_text = int(screen_height * 0.03)
+            avail_top = top_padding + text_block_height + gap_below_text
+            avail_height = max(1, screen_height - avail_top - top_padding)
+        else:
+            avail_top = 0
+            avail_height = screen_height
+        avail_width = screen_width
+
+        img_width = surface.get_width()
+        img_height = surface.get_height()
+        if img_width <= 0 or img_height <= 0:
+            return
+
+        scale = min(avail_width / img_width, avail_height / img_height)
+        target_width = int(img_width * scale)
+        target_height = int(img_height * scale)
+        if self.is_stretched:
+            target_width = int(target_width * (4 / 3))
+
+        scaled_surface = pygame.transform.smoothscale(surface, (target_width, target_height))
+        x_pos, y_pos = self.apply_display_offset(
+            (screen_width - target_width) // 2,
+            avail_top + (avail_height - target_height) // 2
+        )
+        self.screen.blit(scaled_surface, (x_pos, y_pos))
+
     def draw_announcement_interrupt(self, screen_width, screen_height, interrupt):
         """Draw a configured text announcement interrupt."""
         title = interrupt.get('title', '')
         lines = interrupt.get('lines', [])
         max_width = int(screen_width * 0.75)
 
-        title_font = pygame.font.Font(None, min(int(screen_height * 0.13), 72))
-        body_font = pygame.font.Font(None, min(int(screen_height * 0.09), 48))
+        title_font = self._make_font(min(int(screen_height * 0.13), 72))
+        body_font = self._make_font(min(int(screen_height * 0.09), 48))
 
         text_lines = []
         if title:
@@ -546,7 +732,10 @@ class MusicIdentifier:
 
     def draw_text_interrupt(self, screen_width, screen_height, interrupt):
         """Draw the active text interrupt."""
-        if interrupt.get('type') == 'announcement':
+        interrupt_type = interrupt.get('type')
+        if interrupt_type == 'image':
+            self.draw_image_interrupt(screen_width, screen_height, interrupt)
+        elif interrupt_type == 'announcement':
             self.draw_announcement_interrupt(screen_width, screen_height, interrupt)
         else:
             self.draw_schedule_interrupt(screen_width, screen_height, interrupt)
@@ -612,8 +801,8 @@ class MusicIdentifier:
                 alpha = 0
 
             if alpha > 0:
-                title_font = pygame.font.Font(None, 72)
-                artist_font = pygame.font.Font(None, 48)
+                title_font = self._make_font(72)
+                artist_font = self._make_font(48)
 
                 title_surface = self.render_text_with_outline(
                     self.last_identified['title'],
@@ -751,7 +940,7 @@ class MusicIdentifier:
                 self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
             else:
                 self.screen = pygame.display.set_mode((self.screen_width, self.screen_height))
-            self.font = pygame.font.Font(None, 36)
+            self.font = self._make_font(36)
             pygame.mouse.set_visible(False)
 
             # Start config update task if enabled
@@ -760,6 +949,9 @@ class MusicIdentifier:
                 self.logger.debug("Config update loop started")
             else:
                 self.config_update_task = None
+
+            # Start the LAN web server so the gist maintainer can force a refresh
+            await self._start_web_server()
 
             while True:
                 self.handle_events()
@@ -810,8 +1002,8 @@ class MusicIdentifier:
                 notification_surface.fill((0, 0, 0))
                 self.screen.blit(notification_surface, (0, 0))
 
-                title_font = pygame.font.Font(None, 36)
-                message_font = pygame.font.Font(None, 24)
+                title_font = self._make_font(36)
+                message_font = self._make_font(24)
 
                 title_text = title_font.render(self.notification['title'], True, (255, 255, 255))
                 message_text = message_font.render(self.notification['message'], True, (200, 200, 200))
@@ -845,7 +1037,7 @@ class MusicIdentifier:
                 for j in range(3)
             )
 
-        font = pygame.font.Font(None, font_size)
+        font = self._make_font(font_size)
 
         words = text.split()
         lines = []
@@ -884,6 +1076,49 @@ class MusicIdentifier:
 
         return text_surface
 
+    # Display settings that are device-local and must survive remote config
+    # updates: the custom font lives in the gitignored fonts/ folder, and
+    # announcements may be configured per-device.
+    LOCAL_DISPLAY_KEYS = ('font', 'announcements')
+
+    def _merge_local_display_settings(self, remote_config):
+        """Overlay device-local display settings onto a fetched remote config.
+
+        The remote gist is authoritative for shared settings (schedule, hours,
+        off-hours message, etc.), but the keys in ``LOCAL_DISPLAY_KEYS`` are
+        device-local and are preserved across remote updates instead of being
+        overwritten.
+        """
+        merged = dict(remote_config) if remote_config else {}
+        local_display = (self.config or {}).get('display') or {}
+        merged_display = dict(merged.get('display') or {})
+
+        for key in self.LOCAL_DISPLAY_KEYS:
+            if key in local_display:
+                merged_display[key] = local_display[key]
+
+        if merged_display:
+            merged['display'] = merged_display
+        return merged
+
+    def _github_auth_headers(self):
+        """Build GitHub API auth headers from a personal access token, if available.
+
+        The token is read from the ``GITHUB_TOKEN`` (or ``GH_TOKEN``) environment
+        variable, which is loaded from the gitignored ``.env`` file by the
+        justfile/systemd service. Authenticating raises the GitHub API rate limit
+        from 60 to 5000 requests per hour. Returns an empty dict when no token is
+        set so requests stay unauthenticated.
+        """
+        token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+        if not token:
+            return {}
+        return {
+            'Authorization': f'Bearer {token.strip()}',
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        }
+
     async def _fetch_remote_config(self):
         """Fetch remote config from GitHub Gist."""
         remote_config = self.config.get('remote', {})
@@ -897,8 +1132,14 @@ class MusicIdentifier:
                 gist_id = base_url.split('/')[-1]
                 api_url = f"https://api.github.com/gists/{gist_id}"
 
+                # Authenticate the GitHub API call (when a token is configured) to
+                # avoid the 60 req/hr unauthenticated rate limit.
+                auth_headers = self._github_auth_headers()
+                if auth_headers:
+                    self.logger.debug("Using authenticated GitHub API request")
+
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(api_url) as response:
+                    async with session.get(api_url, headers=auth_headers) as response:
                         if response.status == 200:
                             gist_data = await response.json()
                             if gist_data.get('files'):
@@ -911,7 +1152,14 @@ class MusicIdentifier:
                                 self.logger.error("No files found in Gist")
                                 return None
                         else:
-                            self.logger.error(f"Failed to fetch Gist metadata: HTTP {response.status}")
+                            remaining = response.headers.get('X-RateLimit-Remaining')
+                            if response.status in (403, 429) and remaining == '0':
+                                self.logger.error(
+                                    "GitHub API rate limit exceeded. Set a GITHUB_TOKEN in "
+                                    ".env to raise the limit from 60 to 5000 requests/hour."
+                                )
+                            else:
+                                self.logger.error(f"Failed to fetch Gist metadata: HTTP {response.status}")
                             return None
             else:
                 url = base_url + '/raw'
@@ -940,6 +1188,519 @@ class MusicIdentifier:
                 self.logger.debug(traceback.format_exc())
             return None
 
+    async def _refresh_config_from_remote(self):
+        """Fetch the remote gist and apply it locally, preserving device-local
+        display settings.
+
+        Shared by the periodic update loop and the manual refresh endpoint.
+        Returns a dict ``{ok, changed, message}`` describing the outcome. The
+        running app reads config live at render time, so an applied change takes
+        effect without a restart (the exception is ``display.font``, which is
+        loaded once at startup).
+        """
+        remote_config = await self._fetch_remote_config()
+        if not remote_config:
+            return {
+                'ok': False,
+                'changed': False,
+                'message': 'No config received (remote disabled, unreachable, or rate-limited)',
+            }
+
+        remote_config = self._merge_local_display_settings(remote_config)
+
+        with self.config_lock:
+            if yaml.dump(remote_config, sort_keys=True) == yaml.dump(self.config, sort_keys=True):
+                return {'ok': True, 'changed': False, 'message': 'Already up to date'}
+
+            if self._save_config(remote_config):
+                self.logger.info("Updated config file from remote source")
+                self.show_notification("Config Updated", "Configuration refreshed from remote")
+                return {'ok': True, 'changed': True, 'message': 'Config updated'}
+
+            self.logger.warning("Failed to save updated config to file")
+            self.show_notification("Config Update Warning", "Failed to save remote config locally")
+            return {'ok': False, 'changed': False, 'message': 'Failed to save config locally'}
+
+    DAYS_OF_WEEK = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+
+    # Config editor web app served on the LAN. Plain string (not an f-string)
+    # because the embedded CSS/JS contains literal braces.
+    _CONFIG_EDITOR_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Feature Flora — Config</title>
+<link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<link rel="shortcut icon" href="/favicon.ico" />
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-title" content="TV Config" />
+<link rel="manifest" href="/site.webmanifest" />
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:#0f0f0f; color:#f4f4f4; padding:0 0 120px; -webkit-text-size-adjust:100%; }
+  .page { max-width:560px; margin:0 auto; padding:20px 18px; }
+  h1 { font-weight:700; font-size:1.6rem; margin:8px 0 4px; }
+  p.sub { margin:0 0 18px; opacity:.6; font-size:.95rem; }
+  section, details { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:16px;
+                     padding:16px; margin:14px 0; }
+  h2 { font-size:1.05rem; margin:0 0 12px; font-weight:600; }
+  summary { font-size:1.05rem; font-weight:600; cursor:pointer; }
+  details[open] summary { margin-bottom:12px; }
+  .field { display:flex; flex-direction:column; gap:6px; margin:10px 0; }
+  .field > span { font-size:.85rem; opacity:.7; }
+  input[type=text], input[type=number], textarea, input[type=time] {
+    width:100%; font-size:1.05rem; padding:12px; border-radius:12px;
+    border:1px solid #333; background:#222; color:#fff; font-family:inherit; }
+  textarea { resize:vertical; }
+  .dayrow { display:flex; align-items:center; justify-content:space-between; gap:10px;
+            padding:10px 0; border-bottom:1px solid #242424; }
+  .dayrow:last-child { border-bottom:none; }
+  .daytoggle { display:flex; align-items:center; gap:10px; font-size:1.05rem; min-width:120px; }
+  .daytoggle input { width:22px; height:22px; }
+  .times { display:flex; align-items:center; gap:8px; }
+  .times input[type=time] { width:auto; padding:8px 10px; }
+  .times .dash { opacity:.5; }
+  .times .closed { display:none; opacity:.5; }
+  .dayrow.isclosed .times .open, .dayrow.isclosed .times .close, .dayrow.isclosed .times .dash { display:none; }
+  .dayrow.isclosed .times .closed { display:inline; }
+  .anncard { border:1px solid #2c2c2c; border-radius:12px; padding:12px; margin:10px 0;
+             display:flex; flex-direction:column; gap:8px; }
+  .imgrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .imgbtn { background:#333; color:#fff; padding:9px 14px; border-radius:10px; font-size:.9rem;
+            cursor:pointer; display:inline-block; }
+  .rmimg { background:#5a2d2d; padding:8px 12px; font-size:.85rem; }
+  .imgprev { max-width:100%; max-height:200px; border-radius:10px; margin-top:4px; display:block; }
+  .imgstatus { font-size:.85rem; }
+  .imghint { font-size:.8rem; opacity:.55; }
+  .anncard.hasimg .anntitle, .anncard.hasimg .annmsg { opacity:.45; }
+  button { font-size:1.05rem; font-weight:600; padding:12px 18px; border:none; border-radius:12px;
+           background:#2e7d32; color:#fff; cursor:pointer; -webkit-tap-highlight-color:transparent;
+           touch-action:manipulation; }
+  button:active { transform:scale(.98); }
+  button.secondary { background:#333; }
+  button.remove { background:#5a2d2d; align-self:flex-end; padding:8px 14px; font-size:.9rem; }
+  .savebar { position:fixed; left:0; right:0; bottom:0; background:#0f0f0fee;
+             backdrop-filter:blur(8px); border-top:1px solid #2a2a2a; padding:14px 18px;
+             display:flex; align-items:center; gap:14px; }
+  .savebar button { flex:0 0 auto; min-width:140px; font-size:1.2rem; padding:16px 28px; }
+  #status { font-size:1rem; }
+  .ok { color:#81c784; } .err { color:#e57373; } .muted { opacity:.7; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>Feature Flora</h1>
+  <p class="sub">Edit the display settings and tap Save. Changes appear on the screen right away.</p>
+
+  <section>
+    <h2>Weekly Hours</h2>
+    <div id="schedule"></div>
+  </section>
+
+  <section>
+    <h2>Messages</h2>
+    <label class="field"><span>Schedule header</span>
+      <input id="header" type="text" placeholder="Open This Week"></label>
+    <label class="field"><span>Closed message</span>
+      <textarea id="offhours" rows="2" placeholder="We're currently closed."></textarea></label>
+  </section>
+
+  <section>
+    <h2>Announcements</h2>
+    <div id="annlist"></div>
+    <button type="button" id="addann" class="secondary">+ Add announcement</button>
+  </section>
+
+  <details>
+    <summary>Advanced timing</summary>
+    <label class="field"><span>Rotate every (seconds)</span>
+      <input id="interval" type="number" min="5" value="60"></label>
+    <label class="field"><span>Show each for (seconds)</span>
+      <input id="duration" type="number" min="1" value="10"></label>
+  </details>
+</div>
+
+<div class="savebar">
+  <button id="save">Save</button>
+  <div id="status" class="muted">Loading.</div>
+</div>
+
+<script>
+const DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+let CONFIG = {};
+
+function to24(label){
+  if(!label) return "";
+  const m = String(label).trim().match(/^(\\d{1,2}):(\\d{2})\\s*([AaPp][Mm])?$/);
+  if(!m) return "";
+  let h = parseInt(m[1],10); const min = m[2];
+  const ap = m[3] ? m[3].toUpperCase() : null;
+  if(ap){ if(ap==="PM" && h<12) h+=12; if(ap==="AM" && h===12) h=0; }
+  return String(h).padStart(2,"0")+":"+min;
+}
+function to12(hhmm){
+  if(!hhmm) return "";
+  const m = String(hhmm).match(/^(\\d{1,2}):(\\d{2})$/);
+  if(!m) return hhmm;
+  let h = parseInt(m[1],10); const min = m[2];
+  const ap = h>=12 ? "PM" : "AM";
+  let h12 = h%12; if(h12===0) h12=12;
+  return h12+":"+min+" "+ap;
+}
+function esc(s){ return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
+
+async function load(){
+  try {
+    const r = await fetch("/config");
+    CONFIG = await r.json();
+  } catch(e){ setStatus(false,"Could not load config"); return; }
+  renderSchedule();
+  const d = CONFIG.display || {};
+  document.getElementById("header").value = d.schedule_header || "";
+  document.getElementById("offhours").value = d.off_hours_message || "";
+  document.getElementById("interval").value = (d.schedule_interval != null) ? d.schedule_interval : 60;
+  document.getElementById("duration").value = (d.schedule_duration != null) ? d.schedule_duration : 10;
+  renderAnnouncements(d.announcements || []);
+  setStatus(true,"Ready"); document.getElementById("status").className = "muted";
+}
+
+function renderSchedule(){
+  const byDay = {};
+  (CONFIG.schedule || []).forEach(s => { if(s && s.day) byDay[s.day] = s; });
+  const wrap = document.getElementById("schedule");
+  wrap.innerHTML = "";
+  DAYS.forEach(day => {
+    const entry = byDay[day]; const open = !!entry;
+    const row = document.createElement("div");
+    row.className = "dayrow";
+    row.innerHTML =
+      '<label class="daytoggle"><input type="checkbox" data-day="'+day+'" class="dayopen" '+(open?"checked":"")+'><span>'+day+'</span></label>'+
+      '<div class="times">'+
+        '<input type="time" class="open" value="'+(open?to24(entry.open):"09:00")+'">'+
+        '<span class="dash">to</span>'+
+        '<input type="time" class="close" value="'+(open?to24(entry.close):"17:00")+'">'+
+        '<span class="closed">Closed</span>'+
+      '</div>';
+    wrap.appendChild(row);
+    const cb = row.querySelector(".dayopen");
+    const sync = () => row.classList.toggle("isclosed", !cb.checked);
+    cb.addEventListener("change", sync); sync();
+  });
+}
+
+function addAnnouncement(title, message, image){
+  const card = document.createElement("div");
+  card.className = "anncard";
+  card.innerHTML =
+    '<input class="anntitle" type="text" placeholder="Title (optional)" value="'+esc(title)+'">'+
+    '<textarea class="annmsg" rows="2" placeholder="Message">'+esc(message)+'</textarea>'+
+    '<div class="imgrow">'+
+      '<label class="imgbtn">Add image<input type="file" accept="image/*" class="imgfile" hidden></label>'+
+      '<button type="button" class="rmimg" hidden>Remove image</button>'+
+      '<span class="imgstatus muted"></span>'+
+    '</div>'+
+    '<span class="imghint" hidden>Shown full-screen, fit to the display (title/message ignored).</span>'+
+    '<img class="imgprev" hidden alt="">'+
+    '<button type="button" class="remove">Remove</button>';
+  const prev = card.querySelector(".imgprev");
+  const rmimg = card.querySelector(".rmimg");
+  const hint = card.querySelector(".imghint");
+  const status = card.querySelector(".imgstatus");
+  function showImage(name){
+    card.dataset.image = name || "";
+    if(name){
+      prev.src = "/uploads/"+encodeURIComponent(name)+"?t="+Date.now();
+      prev.hidden = false; rmimg.hidden = false; hint.hidden = false;
+      status.textContent = ""; card.classList.add("hasimg");
+    } else {
+      prev.hidden = true; rmimg.hidden = true; hint.hidden = true;
+      card.classList.remove("hasimg");
+    }
+  }
+  card.querySelector(".imgfile").addEventListener("change", async (e)=>{
+    const file = e.target.files[0]; if(!file) return;
+    status.className = "imgstatus muted"; status.textContent = "Uploading.";
+    const fd = new FormData(); fd.append("image", file);
+    try {
+      const r = await fetch("/upload", { method:"POST", body: fd });
+      const d = await r.json();
+      if(d.ok){ showImage(d.filename); }
+      else { status.className="imgstatus err"; status.textContent = "\\u2717 "+(d.message||"Upload failed"); }
+    } catch(err){ status.className="imgstatus err"; status.textContent="\\u2717 Upload failed"; }
+    e.target.value = "";
+  });
+  rmimg.addEventListener("click", ()=>showImage(""));
+  card.querySelector(".remove").addEventListener("click", ()=>card.remove());
+  document.getElementById("annlist").appendChild(card);
+  showImage(image || "");
+}
+function renderAnnouncements(anns){
+  document.getElementById("annlist").innerHTML = "";
+  (anns||[]).forEach(a => addAnnouncement(a.title, a.message || (a.lines ? a.lines.join("\\n") : ""), a.image));
+}
+
+function collect(){
+  const schedule = [];
+  document.querySelectorAll(".dayrow").forEach(row => {
+    const cb = row.querySelector(".dayopen");
+    if(cb.checked){
+      schedule.push({ day: cb.dataset.day,
+        open: to12(row.querySelector(".open").value),
+        close: to12(row.querySelector(".close").value) });
+    }
+  });
+  const announcements = [];
+  document.querySelectorAll(".anncard").forEach(card => {
+    const title = card.querySelector(".anntitle").value.trim();
+    const message = card.querySelector(".annmsg").value.trim();
+    const image = card.dataset.image || "";
+    if(title || message || image) announcements.push({title, message, image});
+  });
+  return { schedule, display: {
+    schedule_header: document.getElementById("header").value,
+    off_hours_message: document.getElementById("offhours").value,
+    schedule_interval: parseInt(document.getElementById("interval").value,10) || 60,
+    schedule_duration: parseInt(document.getElementById("duration").value,10) || 10,
+    announcements } };
+}
+
+function setStatus(ok, msg){
+  const s = document.getElementById("status");
+  s.className = ok ? "ok" : "err";
+  s.textContent = (ok ? "\\u2713 " : "\\u2717 ") + msg;
+}
+
+async function save(){
+  const btn = document.getElementById("save");
+  btn.disabled = true;
+  document.getElementById("status").className = "muted";
+  document.getElementById("status").textContent = "Saving.";
+  try {
+    const r = await fetch("/config", { method:"POST",
+      headers:{"Content-Type":"application/json"}, body: JSON.stringify(collect()) });
+    const d = await r.json();
+    setStatus(!!d.ok, d.message || (d.ok?"Saved":"Error"));
+  } catch(e){ setStatus(false,"Could not reach the display"); }
+  finally { btn.disabled = false; }
+}
+
+document.getElementById("addann").addEventListener("click", ()=>addAnnouncement("",""));
+document.getElementById("save").addEventListener("click", save);
+load();
+</script>
+</body>
+</html>"""
+
+    async def _handle_editor_index(self, request):
+        """Serve the config editor web app."""
+        from aiohttp import web
+        return web.Response(text=self._CONFIG_EDITOR_HTML, content_type='text/html')
+
+    async def _handle_config_get(self, request):
+        """Return the current config as JSON for the editor to populate its form."""
+        from aiohttp import web
+        with self.config_lock:
+            cfg = copy.deepcopy(self.config) if self.config else {}
+        return web.json_response(cfg)
+
+    async def _handle_config_post(self, request):
+        """Apply edited config from the web app: validate, merge, save, live-reload."""
+        from aiohttp import web
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({'ok': False, 'message': 'Invalid request'}, status=400)
+        result = self._apply_editor_config(data)
+        return web.json_response(result, status=(200 if result['ok'] else 400))
+
+    ALLOWED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
+    MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 15 MB
+
+    async def _handle_upload(self, request):
+        """Receive an announcement image (multipart) and save it to announcements/."""
+        from aiohttp import web
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response({'ok': False, 'message': 'Invalid upload'}, status=400)
+
+        field = await reader.next()
+        while field is not None and field.name != 'image':
+            field = await reader.next()
+        if field is None:
+            return web.json_response({'ok': False, 'message': 'No image provided'}, status=400)
+
+        ext = os.path.splitext(field.filename or '')[1].lower()
+        if ext not in self.ALLOWED_IMAGE_EXTS:
+            return web.json_response(
+                {'ok': False, 'message': f'Unsupported type (use {", ".join(self.ALLOWED_IMAGE_EXTS)})'},
+                status=400)
+
+        base = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.splitext(os.path.basename(field.filename or ''))[0])[:40] or 'image'
+        filename = f"{base}-{uuid.uuid4().hex[:8]}{ext}"
+        dest = os.path.join(self._announcements_dir(), filename)
+
+        size = 0
+        try:
+            with open(dest, 'wb') as f:
+                while True:
+                    chunk = await field.read_chunk()
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > self.MAX_IMAGE_BYTES:
+                        f.close()
+                        os.remove(dest)
+                        return web.json_response({'ok': False, 'message': 'Image too large (max 15 MB)'}, status=400)
+                    f.write(chunk)
+        except Exception as e:
+            self.logger.error(f"Failed to save uploaded image: {e}")
+            return web.json_response({'ok': False, 'message': 'Failed to save image'}, status=500)
+
+        self.logger.info(f"Uploaded announcement image: {filename} ({size} bytes)")
+        return web.json_response({'ok': True, 'filename': filename})
+
+    async def _handle_upload_get(self, request):
+        """Serve an uploaded announcement image (for editor previews)."""
+        from aiohttp import web
+        name = os.path.basename(request.match_info.get('name', ''))
+        path = os.path.join(self._announcements_dir(), name)
+        if not name or not os.path.exists(path):
+            return web.Response(status=404)
+        return web.FileResponse(path)
+
+    # Root-served static assets (favicon set + web manifest).
+    STATIC_FILES = (
+        'favicon.svg', 'favicon-96x96.png', 'favicon.ico', 'apple-touch-icon.png',
+        'web-app-manifest-192x192.png', 'web-app-manifest-512x512.png', 'site.webmanifest',
+    )
+
+    def _static_dir(self):
+        """Folder of publicly served static files (favicons, web manifest)."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+
+    async def _handle_static_file(self, request):
+        """Serve a known static asset from the static/ folder by exact name."""
+        from aiohttp import web
+        name = os.path.basename(request.path)
+        if name not in self.STATIC_FILES:
+            return web.Response(status=404)
+        path = os.path.join(self._static_dir(), name)
+        if not os.path.exists(path):
+            return web.Response(status=404)
+        return web.FileResponse(path)
+
+    async def _handle_refresh_action(self, request):
+        """Optional: force a one-off config pull from the remote gist (if enabled)."""
+        from aiohttp import web
+        self.logger.info("Manual config refresh requested via web")
+        result = await self._refresh_config_from_remote()
+        return web.json_response(result)
+
+    def _apply_editor_config(self, data):
+        """Validate editor form data, merge it into the current config (preserving
+        keys the editor does not manage, e.g. display.font and the remote section),
+        save, and live-reload. The running app reads config at render time, so
+        schedule/message/announcement changes take effect without a restart."""
+        if not isinstance(data, dict):
+            return {'ok': False, 'message': 'Invalid payload'}
+
+        schedule_in = data.get('schedule', [])
+        if not isinstance(schedule_in, list):
+            return {'ok': False, 'message': 'Schedule must be a list'}
+        valid_days = set(self.DAYS_OF_WEEK)
+        clean_schedule = []
+        for entry in schedule_in:
+            if not isinstance(entry, dict):
+                return {'ok': False, 'message': 'Invalid schedule entry'}
+            day = str(entry.get('day', '')).strip()
+            open_t = str(entry.get('open', '')).strip()
+            close_t = str(entry.get('close', '')).strip()
+            if day not in valid_days:
+                return {'ok': False, 'message': f'Invalid day: {day or "(blank)"}'}
+            if not open_t or not close_t:
+                return {'ok': False, 'message': f'{day}: open and close times are required'}
+            clean_schedule.append({'day': day, 'open': open_t, 'close': close_t})
+
+        disp_in = data.get('display', {})
+        if not isinstance(disp_in, dict):
+            return {'ok': False, 'message': 'Display settings must be an object'}
+
+        clean_anns = []
+        for ann in disp_in.get('announcements', []) or []:
+            if not isinstance(ann, dict):
+                return {'ok': False, 'message': 'Invalid announcement'}
+            title = str(ann.get('title', '')).strip()
+            message = str(ann.get('message', '')).strip()
+            image = os.path.basename(str(ann.get('image', '')).strip()) if ann.get('image') else ''
+            if image or title or message:
+                entry = {'title': title, 'message': message}
+                if image:
+                    entry['image'] = image
+                clean_anns.append(entry)
+
+        def as_number(value, default):
+            try:
+                return type(default)(value)
+            except (TypeError, ValueError):
+                return default
+
+        with self.config_lock:
+            new_config = copy.deepcopy(self.config) if self.config else {}
+            new_config['schedule'] = clean_schedule
+
+            display = dict(new_config.get('display') or {})
+            if 'schedule_header' in disp_in:
+                display['schedule_header'] = str(disp_in['schedule_header'])
+            if 'off_hours_message' in disp_in:
+                display['off_hours_message'] = str(disp_in['off_hours_message'])
+            if 'schedule_interval' in disp_in:
+                display['schedule_interval'] = as_number(disp_in['schedule_interval'], display.get('schedule_interval', 60))
+            if 'schedule_duration' in disp_in:
+                display['schedule_duration'] = as_number(disp_in['schedule_duration'], display.get('schedule_duration', 10))
+            display['announcements'] = clean_anns
+            new_config['display'] = display
+
+            if self._save_config(new_config):
+                self.logger.info("Config updated via web editor")
+                self.show_notification("Config Updated", "Configuration updated from web app")
+                return {'ok': True, 'message': 'Saved'}
+
+        return {'ok': False, 'message': 'Failed to save config'}
+
+    async def _start_web_server(self):
+        """Start the LAN config-editor web server.
+
+        Lets the display be configured from a phone or tablet on the same network
+        instead of editing YAML. The port can be overridden with the AL_WEB_PORT
+        environment variable (default 8080).
+        """
+        try:
+            from aiohttp import web
+            app = web.Application()
+            app.router.add_get('/', self._handle_editor_index)
+            app.router.add_get('/config', self._handle_config_get)
+            app.router.add_post('/config', self._handle_config_post)
+            app.router.add_post('/upload', self._handle_upload)
+            app.router.add_get('/uploads/{name}', self._handle_upload_get)
+            app.router.add_post('/refresh', self._handle_refresh_action)
+            for static_name in self.STATIC_FILES:
+                app.router.add_get('/' + static_name, self._handle_static_file)
+
+            runner = web.AppRunner(app)
+            await runner.setup()
+            port = int(os.environ.get('AL_WEB_PORT', '8080'))
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            self._web_runner = runner
+            self.logger.info(f"Config editor web server running on http://0.0.0.0:{port}")
+        except Exception as e:
+            self.logger.error(f"Failed to start config editor web server: {e}")
+
     async def _update_config_loop(self):
         """Periodically update config from remote source."""
         self.logger.debug("Starting config update loop")
@@ -948,23 +1709,8 @@ class MusicIdentifier:
         while True:
             try:
                 self.logger.debug("Checking for remote config updates...")
-                remote_config = await self._fetch_remote_config()
-                if remote_config:
-                    self.logger.debug(f"Received remote config: {remote_config}")
-
-                    with self.config_lock:
-                        if yaml.dump(remote_config, sort_keys=True) != yaml.dump(self.config, sort_keys=True):
-                            self.logger.debug("Remote config differs from local config, updating...")
-                            if self._save_config(remote_config):
-                                self.logger.info("Updated config file from remote source")
-                                self.show_notification("Config Updated", "Successfully updated local configuration file")
-                            else:
-                                self.logger.warning("Failed to save updated config to file")
-                                self.show_notification("Config Update Warning", "Failed to save remote config locally")
-                        else:
-                            self.logger.debug("Remote config matches local config, no update needed")
-                else:
-                    self.logger.debug("No remote config received")
+                result = await self._refresh_config_from_remote()
+                self.logger.debug(f"Config refresh: {result['message']}")
 
                 update_interval = self.config.get('remote', {}).get('update_interval', 3600)
                 self.logger.debug(f"Next config check in {update_interval} seconds")
