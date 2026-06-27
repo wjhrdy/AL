@@ -492,37 +492,38 @@ class MusicIdentifier:
     def draw_schedule_interrupt(self, screen_width, screen_height, interrupt=None):
         """Draw the configured operating hours interrupt."""
         schedule_text = (interrupt or {}).get('message') or self._get_schedule_message()
-        lines = schedule_text.split('\n')
+        lines = [line.strip() for line in schedule_text.split('\n') if line.strip()]
 
         is_outside_hours = not self._is_within_operating_hours()
 
         size_multiplier = 0.75 if is_outside_hours else 1.0
         header_font_size = min(int(screen_height * 0.13 * size_multiplier), int(72 * size_multiplier))
         schedule_font_size = min(int(screen_height * 0.09 * size_multiplier), int(48 * size_multiplier))
+        base_gap = int(screen_height * (0.02 if not is_outside_hours else 0.015))
+        outline = 3 if not is_outside_hours else 2
 
-        rendered_lines = []
-        total_height = 0
+        def render_block(scale):
+            """Render the schedule lines at a font scale; return (surfaces, total, gap)."""
+            h_size = max(12, int(header_font_size * scale))
+            s_size = max(10, int(schedule_font_size * scale))
+            gap = max(1, int(base_gap * scale))
+            surfaces = []
+            for i, line in enumerate(lines):
+                font = self._make_font(h_size if i == 0 else s_size)
+                surfaces.append(
+                    self.render_text_with_outline(line, font, (255, 255, 255), (0, 0, 0), outline))
+            total = sum(s.get_height() for s in surfaces)
+            if len(surfaces) > 1:
+                total += gap * (len(surfaces) - 1)
+            return surfaces, total, gap
 
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
+        # Compress the block to fit when there are many entries (e.g. extra days).
+        # Reserve room at the bottom for the off-hours message when it is shown.
+        available_height = int(screen_height * (0.60 if is_outside_hours else 0.92))
 
-            font_size = header_font_size if i == 0 else schedule_font_size
-            font = self._make_font(font_size)
-
-            text_surface = self.render_text_with_outline(
-                line.strip(),
-                font,
-                (255, 255, 255),
-                (0, 0, 0),
-                3 if not is_outside_hours else 2
-            )
-
-            rendered_lines.append(text_surface)
-            total_height += text_surface.get_height()
-
-            if i < len(lines) - 1:
-                total_height += int(screen_height * (0.02 if not is_outside_hours else 0.015))
+        rendered_lines, total_height, gap = render_block(1.0)
+        if total_height > available_height and total_height > 0:
+            rendered_lines, total_height, gap = render_block(available_height / total_height)
 
         vertical_shift = int(screen_height * 0.15) if is_outside_hours else 0
         _, base_y = self.apply_display_offset(0, (screen_height - total_height) // 2 - vertical_shift)
@@ -535,7 +536,7 @@ class MusicIdentifier:
                 top=current_y
             )
             self.screen.blit(text_surface, text_rect)
-            current_y += text_surface.get_height() + int(screen_height * (0.02 if not is_outside_hours else 0.015))
+            current_y += text_surface.get_height() + gap
 
         if is_outside_hours:
             message = self.config.get('display', {}).get('off_hours_message', 'Outside operating hours')
