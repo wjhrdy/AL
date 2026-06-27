@@ -5,26 +5,35 @@
     "devices": [
       {
         "name": "No filtering",
-        "tags": ["all"],
+        "tags": [
+          "all"
+        ],
         "default": true,
         "matching_type": "inclusive",
         "description": "Show every AL image."
       },
       {
         "name": "Raspberry Pi 5",
-        "tags": ["pi5"],
+        "tags": [
+          "pi5"
+        ],
         "matching_type": "inclusive",
         "description": "Raspberry Pi 5 / 5B"
       },
       {
         "name": "Raspberry Pi 4 / 400",
-        "tags": ["pi4", "pi400"],
+        "tags": [
+          "pi4",
+          "pi400"
+        ],
         "matching_type": "inclusive",
         "description": "Raspberry Pi 4 Model B and Raspberry Pi 400 (reference device)."
       },
       {
         "name": "Raspberry Pi 3",
-        "tags": ["pi3"],
+        "tags": [
+          "pi3"
+        ],
         "matching_type": "inclusive",
         "description": "Raspberry Pi 3 Model B / B+."
       }
@@ -39,17 +48,25 @@
         {
           "name": "AL Display (Raspberry Pi OS Bookworm 64-bit)",
           "description": "Raspberry Pi OS with the AL display app, all dependencies, display config, and auto-start service pre-installed. Boots to the now-playing display and shows a QR code to the web config app.",
-          "url": "https://github.com/wjhrdy/AL/releases/latest/download/AL_arm64.img.xz",
+          "url": "https://github.com/wjhrdy/AL/releases/download/v0.1.0/AL_arm64.img.xz",
           "release_date": "2026-06-27",
-          "devices": ["pi5", "pi4", "pi400", "pi3", "all"],
-          "capabilities": ["usb_otg"],
+          "devices": [
+            "pi5",
+            "pi4",
+            "pi400",
+            "pi3",
+            "all"
+          ],
+          "capabilities": [
+            "usb_otg"
+          ],
           "init_format": "cloudinit-rpi",
-          "image_download_size": 0,
-          "image_download_sha256": "",
+          "image_download_size": 1076159572,
+          "image_download_sha256": "2d3d997a5e827485c70d56c7b4d12de45b8f1e431d1c37c6b0b677f8bf0f8579",
           "icon": "https://raw.githubusercontent.com/wjhrdy/AL/main/dist/assets/icon.png",
           "website": "https://github.com/wjhrdy/AL",
-          "extract_size": 0,
-          "extract_sha256": ""
+          "extract_size": 4611801088,
+          "extract_sha256": "f6e18130070d44217ec56f5d5cbd7bf11be9080f1cff5dd1a06e7f9a2b6ee3dc"
         }
       ]
     }
