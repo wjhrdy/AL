@@ -61,12 +61,12 @@
             "usb_otg"
           ],
           "init_format": "cloudinit-rpi",
-          "image_download_size": 1076159572,
-          "image_download_sha256": "2d3d997a5e827485c70d56c7b4d12de45b8f1e431d1c37c6b0b677f8bf0f8579",
+          "image_download_size": 1534412032,
+          "image_download_sha256": "fd9acb68c70146fdf9c7e8629cd779d8ed87cd65e6cbe2520f9df0e3f7841e95",
           "icon": "https://raw.githubusercontent.com/wjhrdy/AL/main/dist/assets/icon.png",
           "website": "https://github.com/wjhrdy/AL",
-          "extract_size": 4611801088,
-          "extract_sha256": "f6e18130070d44217ec56f5d5cbd7bf11be9080f1cff5dd1a06e7f9a2b6ee3dc"
+          "extract_size": 7982587904,
+          "extract_sha256": "8055955f0b739a9e4310f36d3a7ff25ec396ea0ce331e7bfa7ea4fb644f5d13c"
         }
       ]
     }
