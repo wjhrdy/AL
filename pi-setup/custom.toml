@@ -1,0 +1,33 @@
+# Optional alternative to firstrun.sh: Raspberry Pi OS (Bookworm) first-boot
+# customization. Place this file as `custom.toml` on the boot partition to
+# provision the OS without Raspberry Pi Imager's GUI. Fill in the Wi-Fi/password
+# placeholders locally — do NOT commit real secrets (copy to custom.local.toml,
+# which is gitignored).
+#
+# NOTE: custom.toml only provisions the OS; it cannot run the app installer.
+# For zero-touch app install use firstrun.sh + install-to-boot.sh instead (see
+# README.md). Values here mirror pi-config.json.
+
+config_version = 1
+
+[system]
+hostname = "aart"
+
+[user]
+name = "willy"
+# password = "CHANGE_ME"            # plaintext, or:
+# password_encrypted = "<openssl passwd -6 output>"
+
+[ssh]
+enabled = true
+password_authentication = true
+
+[wlan]
+ssid = "CHANGE_ME"
+password = "CHANGE_ME"
+hidden = false
+country = "US"
+
+[locale]
+keymap = "us"
+timezone = "America/New_York"

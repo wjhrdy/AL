@@ -1,0 +1,51 @@
+{
+  "_comment": "Non-secret setup manifest for the AL display Pi. Read by setup.sh / firstrun.sh. Secrets (Wi-Fi, password) go in firstrun.env (gitignored) or the Raspberry Pi Imager GUI.",
+  "hostname": "aart",
+  "user": "willy",
+  "locale": {
+    "language": "en_GB.UTF-8",
+    "timezone": "America/New_York",
+    "keymap": "us",
+    "wifi_country": "US"
+  },
+  "repo": {
+    "url": "https://github.com/wjhrdy/AL.git",
+    "branch": "main",
+    "dir": "/home/willy/AL"
+  },
+  "python_version": "3.11",
+  "apt_packages": [
+    "git",
+    "python3-pygame",
+    "libsdl2-2.0-0",
+    "libsdl2-image-2.0-0",
+    "libsdl2-mixer-2.0-0",
+    "libsdl2-ttf-2.0-0",
+    "libportaudio2",
+    "portaudio19-dev",
+    "python3-dev",
+    "gcc",
+    "ffmpeg"
+  ],
+  "display": {
+    "_comment": "Small HDMI screen forced to a low-res CEA mode (~480p). Matches the inspected device.",
+    "hdmi_force_hotplug": 1,
+    "hdmi_group": 1,
+    "hdmi_mode": 2,
+    "disable_overscan": 0,
+    "dtoverlay": "vc4-kms-v3d"
+  },
+  "service": {
+    "name": "al.service",
+    "description": "AL Music Recognition",
+    "exec": "hello.py --fullscreen",
+    "environment": {
+      "DISPLAY": ":0",
+      "SDL_VIDEODRIVER": "x11"
+    }
+  },
+  "web": {
+    "port": 8080,
+    "setup_splash_seconds": 30
+  }
+}
