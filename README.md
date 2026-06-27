@@ -19,6 +19,34 @@ A music display application for Sonos speakers, optimized for CRT displays. Show
 - **Text Interrupts**: Configurable announcements rotate with the operating-hours display cadence
 - **Remote Config**: Optional config updates from a GitHub Gist
 
+## Quick Start: Flash a ready-made image (Raspberry Pi Imager)
+
+The easiest way to set up a Pi is to flash a prebuilt AL image with
+[Raspberry Pi Imager](https://www.raspberrypi.com/software/) — the app, all
+dependencies, the display config, and the auto-start service come baked in. No
+terminal needed.
+
+1. **Open Raspberry Pi Imager** (version 2.0 or newer).
+2. **Add the AL image repository**: click **ADD OPTIONS** → **EDIT** the Content
+   Repository → choose **Use custom URL** and paste:
+   ```
+   https://raw.githubusercontent.com/wjhrdy/AL/main/dist/repo.json
+   ```
+   (Command-line alternative: `rpi-imager --repo https://raw.githubusercontent.com/wjhrdy/AL/main/dist/repo.json`)
+3. **Choose Device**: select your Raspberry Pi model (Pi 3 / 4 / 5).
+4. **Choose OS**: pick **AL Display** from the list.
+5. **Choose Storage**: select your SD card (8 GB or larger).
+6. **Customize (optional but recommended)**: when prompted, set your **Wi‑Fi**,
+   **hostname**, **username/password**, and enable SSH via Imager's settings.
+7. **Write** the image, then eject the card and insert it into the Pi.
+8. **Boot.** On first boot the display shows a **QR code** to the configuration
+   web app — scan it with your phone, or browse to `http://<hostname>:8080`
+   (default `http://aart:8080`), to set the schedule, announcements, and fonts.
+
+> Prefer to build the image yourself, or curious how it's produced? See
+> [`dist/README.md`](dist/README.md). To set up an *existing* Pi without
+> re-imaging, use [`pi-setup/`](pi-setup/README.md) or the manual steps below.
+
 ## Installation
 
 ```bash
