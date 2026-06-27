@@ -796,6 +796,30 @@ class MusicIdentifier:
         path = os.path.join(self._announcements_dir(), os.path.basename(str(name)))
         return path if os.path.exists(path) else None
 
+    def _prune_announcement_media(self, keep):
+        """Delete uploaded announcement files no longer referenced by the config.
+
+        Called after each editor save so removed/replaced images and videos (and
+        abandoned uploads / leftover transcode temp files) don't accumulate and
+        fill the SD card. ``keep`` is the set of filenames still in use.
+        """
+        directory = self._announcements_dir()
+        try:
+            entries = os.listdir(directory)
+        except OSError:
+            return
+        for name in entries:
+            if name == '.gitkeep' or name in keep:
+                continue
+            path = os.path.join(directory, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                os.remove(path)
+                self.logger.info(f"Pruned unused announcement file: {name}")
+            except OSError as e:
+                self.logger.warning(f"Could not prune {name}: {e}")
+
     def _load_announcement_image(self, path):
         """Load (and cache by mtime) an announcement image as a pygame surface."""
         try:
@@ -2079,6 +2103,8 @@ load();
             if self._save_config(new_config):
                 self.logger.info("Config updated via web editor")
                 self.show_notification("Config Updated", "Configuration updated from web app")
+                keep = {a[k] for a in clean_anns for k in ('image', 'video') if a.get(k)}
+                self._prune_announcement_media(keep)
                 return {'ok': True, 'message': 'Saved'}
 
         return {'ok': False, 'message': 'Failed to save config'}
