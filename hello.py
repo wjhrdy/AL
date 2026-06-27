@@ -1,5 +1,6 @@
 import asyncio
 import pygame
+import pygame.freetype
 from io import BytesIO
 import time
 import warnings
@@ -32,6 +33,80 @@ from soco import discover
 import soco
 
 warnings.filterwarnings('ignore', category=Warning)
+
+
+class _FontChain:
+    """A font with per-glyph fallback across an ordered list of font files.
+
+    Pygame's ``font.render`` only knows the glyphs of a single font, so any
+    character the font lacks renders as a ``.notdef`` square ("tofu"). This
+    wrapper renders each character with the first font in the chain that
+    actually has a glyph for it, so text in any script displays correctly as
+    long as some font in the chain covers it.
+
+    It exposes the same surface-returning ``render(text, antialias, color)`` and
+    ``get_linesize()`` interface as ``pygame.font.Font`` so it drops into the
+    existing rendering helpers. Glyph coverage is detected with
+    ``pygame.freetype`` (whose ``get_metrics`` returns ``None`` for missing
+    glyphs — unlike ``pygame.font``, which reports the ``.notdef`` box), while
+    the actual drawing still uses ``pygame.font`` for identical baseline metrics.
+    """
+
+    def __init__(self, paths, size):
+        if not pygame.freetype.get_init():
+            pygame.freetype.init()
+        self._ttf = [pygame.font.Font(p, size) for p in paths]
+        self._ft = [pygame.freetype.Font(p, size=size) for p in paths]
+        self._seg_cache = {}
+        # Compose surfaces against a common baseline so mixed-font runs line up.
+        self._ascent = max(f.get_ascent() for f in self._ttf)
+        self._descent = max(f.get_height() - f.get_ascent() for f in self._ttf)
+        self._linesize = max(f.get_linesize() for f in self._ttf)
+
+    def get_linesize(self):
+        return self._linesize
+
+    def _font_for(self, ch):
+        """Index of the first chain font that has a glyph for ``ch``."""
+        for i, f in enumerate(self._ft):
+            metrics = f.get_metrics(ch)
+            if metrics and metrics[0] is not None:
+                return i
+        return len(self._ttf) - 1  # last font is the broadest catch-all
+
+    def _segments(self, text):
+        """Split ``text`` into (font_index, run) pairs, caching the result."""
+        cached = self._seg_cache.get(text)
+        if cached is not None:
+            return cached
+        runs = []
+        for ch in text:
+            # Keep whitespace with the preceding run to avoid fragmenting it.
+            idx = (runs[-1][0] if runs else 0) if ch.isspace() else self._font_for(ch)
+            if runs and runs[-1][0] == idx:
+                runs[-1] = (idx, runs[-1][1] + ch)
+            else:
+                runs.append((idx, ch))
+        self._seg_cache[text] = runs
+        return runs
+
+    def render(self, text, antialias, color):
+        if not text:
+            return self._ttf[0].render('', antialias, color)
+        runs = self._segments(text)
+        if len(runs) == 1:
+            return self._ttf[runs[0][0]].render(runs[0][1], antialias, color)
+        surfaces = [(self._ttf[i], self._ttf[i].render(run, antialias, color))
+                    for i, run in runs]
+        width = sum(s.get_width() for _, s in surfaces)
+        height = self._ascent + self._descent
+        out = pygame.Surface((max(width, 1), max(height, 1)), pygame.SRCALPHA)
+        x = 0
+        for font, surface in surfaces:
+            out.blit(surface, (x, self._ascent - font.get_ascent()))
+            x += surface.get_width()
+        return out
+
 
 class _VideoPlayer:
     """Decodes a video file frame-by-frame for announcement playback.
@@ -158,13 +233,10 @@ class MusicIdentifier:
         self.screen = None
         self.font = None
         self._font_path = self._find_font()
+        self._album_font_paths = self._find_album_fonts()
+        self._album_font_cache = {}
         self.is_fullscreen = False
         self.is_stretched = False
-
-        # Text scrolling
-        self.scroll_start_time = 0
-        self.SCROLL_PAUSE = 2.0
-        self.SCROLL_SPEED = 100
 
         # Display modes
         self.NORMAL_RATIO = 16/9
@@ -240,6 +312,53 @@ class MusicIdentifier:
 
     def _make_font(self, size):
         return pygame.font.Font(self._font_path, size)
+
+    # Album art title/artist can be in any language, so they use a broad,
+    # multi-script font chain instead of the (Latin-only) custom display font.
+    DEFAULT_ALBUM_FONTS = ('NotoSansCJKsc-Regular.otf', 'unifont.otf')
+
+    def _find_album_fonts(self):
+        """Resolve the ordered font chain used for album art text.
+
+        Looks for ``display.album_font`` in the config (a filename or list of
+        filenames in the ``fonts/`` folder); falls back to a bundled chain that
+        covers nearly every script (Noto Sans CJK for the common cases, GNU
+        Unifont as a universal catch-all so no character renders as a square).
+        Returns the list of existing font paths, or ``[]`` to fall back to the
+        custom display font.
+        """
+        fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fonts')
+        configured = self.config.get('display', {}).get('album_font')
+        if isinstance(configured, str):
+            names = [configured] if configured else []
+        elif isinstance(configured, (list, tuple)):
+            names = [n for n in configured if n]
+        else:
+            names = list(self.DEFAULT_ALBUM_FONTS)
+
+        paths = []
+        for name in names:
+            path = os.path.join(fonts_dir, name)
+            if os.path.exists(path):
+                paths.append(path)
+            else:
+                self.logger.warning(f"Album art font '{name}' not found in {fonts_dir}")
+
+        if paths:
+            self.logger.info(f"Album art font chain: {[os.path.basename(p) for p in paths]}")
+        else:
+            self.logger.info("No album art fonts found; album text uses the custom display font")
+        return paths
+
+    def _make_album_font(self, size):
+        """Font (with multi-script fallback) for album art title/artist text."""
+        if not self._album_font_paths:
+            return self._make_font(size)
+        chain = self._album_font_cache.get(size)
+        if chain is None:
+            chain = _FontChain(self._album_font_paths, size)
+            self._album_font_cache[size] = chain
+        return chain
 
     def _load_config(self):
         """Load the configuration from YAML file."""
@@ -345,41 +464,6 @@ class MusicIdentifier:
         final_surface.blit(text_surface, (outline_width, outline_width))
 
         return final_surface
-
-    def draw_scrolling_text(self, text_surface, y_pos, alpha, max_width):
-        """Draw scrolling text if it's wider than the screen."""
-        text_width = text_surface.get_width()
-        screen_width = pygame.display.get_surface().get_width()
-
-        if text_width <= max_width:
-            x_pos = (screen_width - text_width) // 2
-            temp_surface = pygame.Surface((text_width, text_surface.get_height()), pygame.SRCALPHA)
-            temp_surface.blit(text_surface, (0, 0))
-            temp_surface.set_alpha(int(alpha * 255))
-            self.screen.blit(temp_surface, (x_pos, y_pos))
-        else:
-            current_time = time.time()
-            elapsed = current_time - self.scroll_start_time
-            total_scroll_time = (text_width / self.SCROLL_SPEED) + (self.SCROLL_PAUSE * 2)
-
-            if elapsed > total_scroll_time:
-                self.scroll_start_time = current_time
-                elapsed = 0
-
-            visible_surface = pygame.Surface((max_width, text_surface.get_height()), pygame.SRCALPHA)
-
-            if elapsed < self.SCROLL_PAUSE:
-                x_scroll = 0
-            elif elapsed > total_scroll_time - self.SCROLL_PAUSE:
-                x_scroll = text_width - max_width
-            else:
-                scroll_elapsed = elapsed - self.SCROLL_PAUSE
-                x_scroll = int(scroll_elapsed * self.SCROLL_SPEED)
-                x_scroll = min(x_scroll, text_width - max_width)
-
-            visible_surface.blit(text_surface, (-x_scroll, 0))
-            visible_surface.set_alpha(int(alpha * 255))
-            self.screen.blit(visible_surface, ((screen_width - max_width) // 2, y_pos))
 
     def _config_number(self, value, default, config_key):
         """Parse a numeric config value with a safe fallback."""
@@ -597,6 +681,24 @@ class MusicIdentifier:
             lines.append(' '.join(current_line))
 
         return lines
+
+    def _render_text_fit(self, text, font, color, outline_width, max_width):
+        """Render text to fit ``max_width`` with no scrolling: wrap on spaces,
+        then shrink any line still too wide (e.g. scripts without spaces, or a
+        single long word). Returns a list of surfaces, each <= max_width wide."""
+        text = (text or '').strip()
+        if not text:
+            return []
+        lines = self.wrap_text(text, font, max_width) or [text]
+        surfaces = []
+        for line in lines:
+            surface = self.render_text_with_outline(line, font, color, (0, 0, 0), outline_width)
+            if surface.get_width() > max_width:
+                scale = max_width / surface.get_width()
+                surface = pygame.transform.smoothscale(
+                    surface, (max_width, max(1, int(surface.get_height() * scale))))
+            surfaces.append(surface)
+        return surfaces
 
     def draw_schedule_interrupt(self, screen_width, screen_height, interrupt=None):
         """Draw the configured operating hours interrupt."""
@@ -1005,47 +1107,45 @@ class MusicIdentifier:
             self.screen.blit(scaled_surface, (x_pos, y_pos))
 
         if self.last_identified and self.last_song_time and not text_interrupt_showing:
-            # Always display the song info over the album art for the duration
-            # of the track, rather than fading it out shortly after it starts.
-            alpha = 255
+            # Song info over the album art: title + artist wrapped/shrunk to fit
+            # the width (no scrolling) and centered as a block, like the other
+            # screens.
+            title_font = self._make_album_font(72)
+            artist_font = self._make_album_font(48)
+            max_width = int(screen_width * 0.9)
 
-            if alpha > 0:
-                title_font = self._make_font(72)
-                artist_font = self._make_font(48)
+            title_surfaces = self._render_text_fit(
+                self.last_identified['title'], title_font, (255, 255, 255), 3, max_width)
+            artist_surfaces = self._render_text_fit(
+                self.last_identified['artist'], artist_font, (255, 255, 255), 2, max_width)
+            surfaces = title_surfaces + artist_surfaces
 
-                title_surface = self.render_text_with_outline(
-                    self.last_identified['title'],
-                    title_font,
-                    (255, 255, 255),
-                    (0, 0, 0),
-                    3
-                )
-                artist_surface = self.render_text_with_outline(
-                    self.last_identified['artist'],
-                    artist_font,
-                    (255, 255, 255),
-                    (0, 0, 0),
-                    2
-                )
+            if surfaces:
+                line_gap = int(screen_height * 0.02)
+                group_gap = int(screen_height * 0.04)
+                n_title = len(title_surfaces)
 
-                max_width = int(screen_width * 0.8)
+                def gap_before(i):
+                    if i == 0:
+                        return 0
+                    return group_gap if i == n_title else line_gap
 
-                _, title_y = self.apply_display_offset(0, screen_height // 2 - 40)
-                _, artist_y = self.apply_display_offset(0, screen_height // 2 + 40)
+                total = sum(s.get_height() for s in surfaces) + sum(gap_before(i) for i in range(len(surfaces)))
+                max_h = int(screen_height * 0.94)
+                if total > max_h:  # very long titles: shrink the whole block to fit
+                    sc = max_h / total
+                    surfaces = [pygame.transform.smoothscale(
+                        s, (max(1, int(s.get_width() * sc)), max(1, int(s.get_height() * sc)))) for s in surfaces]
+                    line_gap = int(line_gap * sc)
+                    group_gap = int(group_gap * sc)
+                    total = sum(s.get_height() for s in surfaces) + sum(gap_before(i) for i in range(len(surfaces)))
 
-                self.draw_scrolling_text(
-                    title_surface,
-                    title_y,
-                    alpha,
-                    max_width
-                )
-
-                x_pos, _ = self.apply_display_offset(screen_width // 2, 0)
-                artist_rect = artist_surface.get_rect(center=(x_pos, artist_y))
-                temp_surface = pygame.Surface(artist_surface.get_size(), pygame.SRCALPHA)
-                temp_surface.blit(artist_surface, (0, 0))
-                temp_surface.set_alpha(int(alpha))
-                self.screen.blit(temp_surface, artist_rect)
+                y = (screen_height - total) // 2
+                for i, s in enumerate(surfaces):
+                    y += gap_before(i)
+                    x_pos, y_pos = self.apply_display_offset((screen_width - s.get_width()) // 2, y)
+                    self.screen.blit(s, (x_pos, y_pos))
+                    y += s.get_height()
 
         if text_interrupt_showing:
             self.draw_text_interrupt(screen_width, screen_height, self.active_text_interrupt)

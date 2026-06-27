@@ -179,6 +179,10 @@ cache/
 # Configure which one to use via display.font in config.yaml.
 /fonts/*
 !/fonts/.gitkeep
+# ...except the bundled multi-script album art fonts, which ship with the app
+# so album titles/artists in any language display correctly (see album_font).
+!/fonts/NotoSansCJKsc-Regular.otf
+!/fonts/unifont.otf
 
 # Uploaded announcement images (device-local, not committed)
 /announcements/*

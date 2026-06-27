@@ -24,6 +24,11 @@ display:
   schedule_header: Operating Hours
   schedule_time_format: "{open} - {close}"  # Format for displaying time ranges
   font: ""  # Optional: filename of a custom font placed in the gitignored fonts/ folder (e.g. KlangMT.ttf); blank = Pygame default
+  # Album art title/artist text uses a broad multi-script font chain so song
+  # names in any language render correctly (the custom font above is often
+  # Latin-only). Defaults to the bundled NotoSansCJKsc-Regular.otf + unifont.otf.
+  # Override with a filename or ordered list of filenames in fonts/.
+  # album_font: [NotoSansCJKsc-Regular.otf, unifont.otf]
   schedule_interval: 60  # Shared cadence for hours and announcement interrupts
   schedule_duration: 10  # Shared display duration for hours and announcement interrupts
   announcements:
