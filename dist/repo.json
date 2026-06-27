@@ -48,7 +48,7 @@
         {
           "name": "AL Display (Raspberry Pi OS Bookworm 64-bit)",
           "description": "Raspberry Pi OS with the AL display app, all dependencies, display config, and auto-start service pre-installed. Boots to the now-playing display and shows a QR code to the web config app.",
-          "url": "https://github.com/wjhrdy/AL/releases/download/v0.1.1/AL_arm64.img.xz",
+          "url": "https://github.com/wjhrdy/AL/releases/download/v0.1.2/AL_arm64.img.xz",
           "release_date": "2026-06-27",
           "devices": [
             "pi5",
@@ -61,12 +61,12 @@
             "usb_otg"
           ],
           "init_format": "cloudinit-rpi",
-          "image_download_size": 1562892552,
-          "image_download_sha256": "65ab65cce025cce6274413caedb85033d507e56ff01445a6555ff5c854fdff51",
+          "image_download_size": 1562112428,
+          "image_download_sha256": "44e417e3dec88d8c94b0359c07bc66ab81baf72d99c76015e027551fa0b79484",
           "icon": "https://raw.githubusercontent.com/wjhrdy/AL/main/dist/assets/icon.png",
           "website": "https://github.com/wjhrdy/AL",
-          "extract_size": 8019345408,
-          "extract_sha256": "969968ab447cc39cd9baca38091ae74f7bf18802e711169d1df358994ca90fcc"
+          "extract_size": 8019357696,
+          "extract_sha256": "0ea0c5d5bb4f8e9f9f8c335e5e4074ca46035c68be63f271ff58a2035696d247"
         }
       ]
     }
