@@ -10,19 +10,104 @@ import os
 import re
 import copy
 import uuid
+import socket
 import aiohttp
 import hashlib
+try:
+    import segno  # QR code generation for the setup screen (optional)
+except ImportError:
+    segno = None
 try:
     from PIL import Image as PILImage, ImageOps as PILImageOps
 except ImportError:  # Pillow optional: without it, images load via pygame (no EXIF rotation)
     PILImage = None
     PILImageOps = None
+try:
+    import cv2  # OpenCV: decodes video announcements (optional)
+except ImportError:
+    cv2 = None
 import yaml
 import threading
 from soco import discover
 import soco
 
 warnings.filterwarnings('ignore', category=Warning)
+
+class _VideoPlayer:
+    """Decodes a video file frame-by-frame for announcement playback.
+
+    Frames are paced by wall-clock time (so playback runs at the correct speed
+    regardless of the draw rate) and the clip loops to fill its display window.
+    OpenCV's ORIENTATION_AUTO applies the rotation metadata that iPhones write,
+    so portrait videos play upright. Decoded silently (no audio).
+    """
+
+    def __init__(self, path, logger):
+        self.path = path
+        self.logger = logger
+        self.cap = cv2.VideoCapture(path)
+        try:
+            self.cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
+        except Exception:
+            pass
+        fps = self.cap.get(cv2.CAP_PROP_FPS) if self.cap else 0
+        self.fps = fps if 0 < fps <= 120 else 30.0
+        self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if self.cap else 0
+        self.start_time = None
+        self.decoded_idx = -1
+        self.last_target = -1
+        self.last_surface = None
+
+    def _restart(self, now):
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        self.decoded_idx = -1
+        self.start_time = now
+
+    def get_surface(self, now):
+        """Return the pygame surface for the frame due at wall-clock ``now``."""
+        if self.cap is None or not self.cap.isOpened():
+            return self.last_surface
+        if self.start_time is None:
+            self.start_time = now
+
+        target = int((now - self.start_time) * self.fps)
+        if self.frame_count > 0 and target >= self.frame_count:
+            self._restart(now)
+            target = 0
+        if target == self.last_target and self.last_surface is not None:
+            return self.last_surface
+
+        while self.decoded_idx < target:
+            if not self.cap.grab():
+                self._restart(now)
+                target = 0
+                if not self.cap.grab():
+                    return self.last_surface
+            self.decoded_idx += 1
+
+        ok, frame = self.cap.retrieve()
+        if not ok or frame is None:
+            return self.last_surface
+        try:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            height, width = rgb.shape[:2]
+            surface = pygame.image.frombuffer(rgb.tobytes(), (width, height), 'RGB').convert()
+        except Exception as e:
+            self.logger.error(f"Failed to convert video frame for {self.path}: {e}")
+            return self.last_surface
+
+        self.last_surface = surface
+        self.last_target = target
+        return surface
+
+    def release(self):
+        try:
+            if self.cap is not None:
+                self.cap.release()
+        except Exception:
+            pass
+        self.cap = None
+
 
 class MusicIdentifier:
     def __init__(self, debug_mode=False, always_open=False):
@@ -115,6 +200,13 @@ class MusicIdentifier:
 
         # Cache of loaded announcement images, keyed by path -> (mtime, surface)
         self._announcement_image_cache = {}
+        # Active video announcement player (created lazily while a video shows)
+        self._video_player = None
+        # Throttle Sonos polling so a faster (video) draw loop doesn't hammer it
+        self._last_sonos_poll = 0
+        # QR setup-screen state
+        self._qr_cache = {}
+        self._setup_splash_until = 0
 
         # Initialize Sonos discovery
         self.sonos_speaker = None
@@ -353,35 +445,41 @@ class MusicIdentifier:
                 if not enabled:
                     continue
 
-                # Image announcements: shown full-screen, fit to the display, on
-                # the same rotation cadence as text announcements.
-                image_name = announcement.get('image')
-                if image_name:
-                    image_path = self._resolve_announcement_image(image_name)
-                    if not image_path:
-                        self.logger.warning(f"Announcement image not found: {image_name}")
+                # Image/video announcements: shown full-screen, fit to the display,
+                # on the same rotation cadence as text announcements, with any
+                # title/message rendered above the media.
+                media_name = announcement.get('image') or announcement.get('video')
+                if media_name:
+                    is_video = bool(announcement.get('video'))
+                    media_path = self._resolve_announcement_media(media_name)
+                    if not media_path:
+                        self.logger.warning(f"Announcement media not found: {media_name}")
+                        continue
+                    if is_video and cv2 is None:
+                        self.logger.warning("Video announcement skipped: OpenCV not installed")
                         continue
 
-                    image_title = announcement.get('title') or announcement.get('header') or ''
+                    media_title = announcement.get('title') or announcement.get('header') or ''
                     if isinstance(announcement.get('lines'), list):
-                        image_lines = [str(line) for line in announcement['lines']]
+                        media_lines = [str(line) for line in announcement['lines']]
                     else:
-                        image_message = (
+                        media_message = (
                             announcement.get('message') or
                             announcement.get('text') or
                             announcement.get('body') or
                             ''
                         )
-                        image_lines = str(image_message).splitlines() if image_message else []
-                    image_lines = [line for line in image_lines if str(line).strip()]
+                        media_lines = str(media_message).splitlines() if media_message else []
+                    media_lines = [line for line in media_lines if str(line).strip()]
 
-                    configured_announcements.append({
-                        'type': 'image',
-                        'image': image_path,
-                        'title': str(image_title) if image_title else '',
-                        'lines': image_lines,
+                    interrupt = {
+                        'type': 'video' if is_video else 'image',
+                        'title': str(media_title) if media_title else '',
+                        'lines': media_lines,
                         'duration': announcement.get('duration'),
-                    })
+                    }
+                    interrupt['video' if is_video else 'image'] = media_path
+                    configured_announcements.append(interrupt)
                     continue
 
                 title = (
@@ -456,12 +554,23 @@ class MusicIdentifier:
         self.text_interrupt_showing = True
         self.text_interrupt_show_start = current_time
         self.last_text_interrupt_display = current_time
+
+        # Release any video player when the new interrupt isn't that same video.
+        if self._video_player is not None and self.active_text_interrupt.get('video') != self._video_player.path:
+            self._release_video_player()
         return True
+
+    def _release_video_player(self):
+        """Release the active video announcement player, if any."""
+        if self._video_player is not None:
+            self._video_player.release()
+            self._video_player = None
 
     def _stop_text_interrupt(self):
         """Stop the active text interrupt."""
         self.text_interrupt_showing = False
         self.active_text_interrupt = None
+        self._release_video_player()
 
     def wrap_text(self, text, font, max_width):
         """Wrap text to fit within a given width."""
@@ -578,8 +687,8 @@ class MusicIdentifier:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _resolve_announcement_image(self, name):
-        """Resolve an announcement image filename to an existing path, or None."""
+    def _resolve_announcement_media(self, name):
+        """Resolve an announcement media filename to an existing path, or None."""
         if not name:
             return None
         path = os.path.join(self._announcements_dir(), os.path.basename(str(name)))
@@ -622,13 +731,34 @@ class MusicIdentifier:
             return None
 
     def draw_image_interrupt(self, screen_width, screen_height, interrupt):
-        """Draw an image announcement: any title/message text on top, with the
-        image zoomed to fit the remaining space below (aspect ratio preserved)."""
+        """Draw an image announcement (text on top, image fit below)."""
         surface = self._load_announcement_image(interrupt.get('image'))
         if surface is None:
             return
+        self._draw_media_interrupt(screen_width, screen_height, interrupt, surface)
 
-        # Render any title/message above the image.
+    def draw_video_interrupt(self, screen_width, screen_height, interrupt):
+        """Draw a video announcement (text on top, video frame fit below)."""
+        if cv2 is None:
+            return
+        path = interrupt.get('video')
+        if not path:
+            return
+        if self._video_player is None or self._video_player.path != path:
+            if self._video_player is not None:
+                self._video_player.release()
+            self._video_player = _VideoPlayer(path, self.logger)
+        surface = self._video_player.get_surface(time.time())
+        if surface is None:
+            return
+        # Fast (non-smooth) scaling for video frames — cheaper per frame.
+        self._draw_media_interrupt(screen_width, screen_height, interrupt, surface, smooth=False)
+
+    def _draw_media_interrupt(self, screen_width, screen_height, interrupt, surface, smooth=True):
+        """Render an interrupt's title/message on top, then the given media
+        surface zoomed to fit the remaining space below (aspect ratio preserved).
+        Shared by image and video announcements. ``smooth`` uses smoothscale
+        (images); video uses fast scale to keep per-frame cost low."""
         title = interrupt.get('title', '')
         lines = interrupt.get('lines', [])
         top_padding = int(screen_height * 0.04)
@@ -654,7 +784,7 @@ class MusicIdentifier:
             self.screen.blit(text_surface, rect)
             current_y += text_surface.get_height() + line_gap
 
-        # Compute the area available for the image (below the text, if any).
+        # Compute the area available for the media (below the text, if any).
         if text_surfaces:
             text_block_height = sum(s.get_height() for s in text_surfaces) + line_gap * (len(text_surfaces) - 1)
             gap_below_text = int(screen_height * 0.03)
@@ -665,18 +795,19 @@ class MusicIdentifier:
             avail_height = screen_height
         avail_width = screen_width
 
-        img_width = surface.get_width()
-        img_height = surface.get_height()
-        if img_width <= 0 or img_height <= 0:
+        media_width = surface.get_width()
+        media_height = surface.get_height()
+        if media_width <= 0 or media_height <= 0:
             return
 
-        scale = min(avail_width / img_width, avail_height / img_height)
-        target_width = int(img_width * scale)
-        target_height = int(img_height * scale)
+        scale = min(avail_width / media_width, avail_height / media_height)
+        target_width = int(media_width * scale)
+        target_height = int(media_height * scale)
         if self.is_stretched:
             target_width = int(target_width * (4 / 3))
 
-        scaled_surface = pygame.transform.smoothscale(surface, (target_width, target_height))
+        scaler = pygame.transform.smoothscale if smooth else pygame.transform.scale
+        scaled_surface = scaler(surface, (target_width, target_height))
         x_pos, y_pos = self.apply_display_offset(
             (screen_width - target_width) // 2,
             avail_top + (avail_height - target_height) // 2
@@ -736,10 +867,87 @@ class MusicIdentifier:
         interrupt_type = interrupt.get('type')
         if interrupt_type == 'image':
             self.draw_image_interrupt(screen_width, screen_height, interrupt)
+        elif interrupt_type == 'video':
+            self.draw_video_interrupt(screen_width, screen_height, interrupt)
         elif interrupt_type == 'announcement':
             self.draw_announcement_interrupt(screen_width, screen_height, interrupt)
         else:
             self.draw_schedule_interrupt(screen_width, screen_height, interrupt)
+
+    def _local_ip(self):
+        """Best-effort LAN IP address of this device."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return "127.0.0.1"
+
+    def _config_url(self):
+        """URL of the config web app, for the setup QR code."""
+        try:
+            port = int(os.environ.get('AL_WEB_PORT', '8080'))
+        except (TypeError, ValueError):
+            port = 8080
+        return f"http://{self._local_ip()}:{port}"
+
+    def _get_qr_surface(self, data, target_px):
+        """Render (and cache) a QR code for ``data`` as a pygame surface ~target_px."""
+        if segno is None:
+            return None
+        key = (data, target_px)
+        if key in self._qr_cache:
+            return self._qr_cache[key]
+        try:
+            rows = [list(row) for row in segno.make(data, error='m').matrix]
+        except Exception as e:
+            self.logger.error(f"QR generation failed: {e}")
+            return None
+        modules = len(rows)
+        border = 4
+        full = modules + 2 * border
+        base = pygame.Surface((full, full))
+        base.fill((255, 255, 255))
+        for y, row in enumerate(rows):
+            for x, bit in enumerate(row):
+                if bit:
+                    base.set_at((x + border, y + border), (0, 0, 0))
+        scale = max(1, target_px // full)
+        surface = pygame.transform.scale(base, (full * scale, full * scale))
+        self._qr_cache[key] = surface
+        return surface
+
+    def draw_setup_screen(self, screen_width, screen_height):
+        """Draw the first-run setup screen: a QR code linking to the config URL."""
+        url = self._config_url()
+        qr = self._get_qr_surface(url, int(min(screen_width, screen_height) * 0.55))
+
+        title_font = self._make_font(min(int(screen_height * 0.09), 44))
+        url_font = self._make_font(min(int(screen_height * 0.06), 30))
+        title = self.render_text_with_outline("Scan to set up", title_font, (255, 255, 255), (0, 0, 0), 2)
+        url_surface = self.render_text_with_outline(url, url_font, (130, 200, 255), (0, 0, 0), 2)
+
+        gap = int(screen_height * 0.03)
+        qr_h = qr.get_height() if qr else 0
+        total = title.get_height() + gap + qr_h + gap + url_surface.get_height()
+        cx, _ = self.apply_display_offset(screen_width // 2, 0)
+        y = (screen_height - total) // 2
+
+        _, ty = self.apply_display_offset(0, y)
+        self.screen.blit(title, title.get_rect(centerx=cx, top=ty))
+        y += title.get_height() + gap
+        if qr:
+            _, qy = self.apply_display_offset(0, y)
+            self.screen.blit(qr, qr.get_rect(centerx=cx, top=qy))
+            y += qr_h + gap
+        _, uy = self.apply_display_offset(0, y)
+        self.screen.blit(url_surface, url_surface.get_rect(centerx=cx, top=uy))
 
     def draw_window(self):
         """Draw the window contents."""
@@ -752,6 +960,13 @@ class MusicIdentifier:
         self.screen.fill((0, 0, 0))
 
         current_time = time.time()
+
+        # First-run setup splash: show the config QR code for a short window at boot.
+        if current_time < self._setup_splash_until:
+            self.draw_setup_screen(screen_width, screen_height)
+            self.draw_notification()
+            pygame.display.flip()
+            return
 
         if self._should_show_text_interrupt(current_time):
             if not self.text_interrupt_showing:
@@ -790,16 +1005,9 @@ class MusicIdentifier:
             self.screen.blit(scaled_surface, (x_pos, y_pos))
 
         if self.last_identified and self.last_song_time and not text_interrupt_showing:
-            current_time = time.time()
-            elapsed_time = current_time - self.last_song_time
-
-            if elapsed_time < self.show_duration:
-                alpha = 255
-            elif elapsed_time < (self.show_duration + self.fade_duration):
-                fade_progress = (elapsed_time - self.show_duration) / self.fade_duration
-                alpha = int(255 * (1 - fade_progress))
-            else:
-                alpha = 0
+            # Always display the song info over the album art for the duration
+            # of the track, rather than fading it out shortly after it starts.
+            alpha = 255
 
             if alpha > 0:
                 title_font = self._make_font(72)
@@ -954,25 +1162,43 @@ class MusicIdentifier:
             # Start the LAN web server so the gist maintainer can force a refresh
             await self._start_web_server()
 
+            # Show the setup QR splash for a short window at startup.
+            try:
+                splash_secs = int(os.environ.get('AL_SETUP_SPLASH_SECS', '30'))
+            except (TypeError, ValueError):
+                splash_secs = 30
+            if splash_secs > 0:
+                self._setup_splash_until = time.time() + splash_secs
+                self.logger.info(f"Setup screen: {self._config_url()} (showing for {splash_secs}s)")
+
             while True:
                 self.handle_events()
 
-                sonos_track = await self.get_sonos_track_info()
+                # Throttle Sonos polling to ~1s so the faster (video) draw loop
+                # does not hammer the speaker.
+                now = time.time()
+                if now - self._last_sonos_poll >= 1.0:
+                    self._last_sonos_poll = now
+                    sonos_track = await self.get_sonos_track_info()
 
-                if sonos_track:
-                    if (not self.last_identified or
-                        sonos_track['title'] != self.last_identified['title'] or
-                        sonos_track['artist'] != self.last_identified['artist']):
+                    if sonos_track:
+                        if (not self.last_identified or
+                            sonos_track['title'] != self.last_identified['title'] or
+                            sonos_track['artist'] != self.last_identified['artist']):
 
-                        self.last_identified = sonos_track
-                        self.last_song_time = time.time()
+                            self.last_identified = sonos_track
+                            self.last_song_time = time.time()
 
-                        await self.display_album_art(sonos_track)
+                            await self.display_album_art(sonos_track)
 
-                        self.logger.info(f"Sonos playing: {sonos_track['title']} by {sonos_track['artist']}")
+                            self.logger.info(f"Sonos playing: {sonos_track['title']} by {sonos_track['artist']}")
 
                 self.draw_window()
-                await asyncio.sleep(0.1)
+
+                # Run at a higher frame rate while a video announcement is playing.
+                active = self.active_text_interrupt
+                playing_video = (self.text_interrupt_showing and active and active.get('type') == 'video')
+                await asyncio.sleep(1 / 30 if playing_video else 0.1)
 
         except Exception as e:
             self.logger.error(f"Fatal error in run loop: {e}")
@@ -1274,10 +1500,10 @@ class MusicIdentifier:
   .imgbtn { background:#333; color:#fff; padding:9px 14px; border-radius:10px; font-size:.9rem;
             cursor:pointer; display:inline-block; }
   .rmimg { background:#5a2d2d; padding:8px 12px; font-size:.85rem; }
-  .imgprev { max-width:100%; max-height:200px; border-radius:10px; margin-top:4px; display:block; }
+  .imgprev, .vidprev { max-width:100%; max-height:200px; border-radius:10px; margin-top:4px; display:block; }
   .imgstatus { font-size:.85rem; }
   .imghint { font-size:.8rem; opacity:.55; }
-  .anncard.hasimg .anntitle, .anncard.hasimg .annmsg { opacity:.45; }
+  .anncard.hasmedia .anntitle, .anncard.hasmedia .annmsg { opacity:.45; }
   button { font-size:1.05rem; font-weight:600; padding:12px 18px; border:none; border-radius:12px;
            background:#2e7d32; color:#fff; cursor:pointer; -webkit-tap-highlight-color:transparent;
            touch-action:manipulation; }
@@ -1393,55 +1619,65 @@ function renderSchedule(){
   });
 }
 
-function addAnnouncement(title, message, image){
+function addAnnouncement(title, message, image, video){
   const card = document.createElement("div");
   card.className = "anncard";
   card.innerHTML =
     '<input class="anntitle" type="text" placeholder="Title (optional)" value="'+esc(title)+'">'+
     '<textarea class="annmsg" rows="2" placeholder="Message">'+esc(message)+'</textarea>'+
     '<div class="imgrow">'+
-      '<label class="imgbtn">Add image<input type="file" accept="image/*" class="imgfile" hidden></label>'+
-      '<button type="button" class="rmimg" hidden>Remove image</button>'+
+      '<label class="imgbtn">Add image / video<input type="file" accept="image/*,video/*" class="imgfile" hidden></label>'+
+      '<button type="button" class="rmimg" hidden>Remove media</button>'+
       '<span class="imgstatus muted"></span>'+
     '</div>'+
-    '<span class="imghint" hidden>Shown full-screen, fit to the display (title/message ignored).</span>'+
+    '<span class="imghint" hidden>Shown fit to the display, with the title/message above it.</span>'+
     '<img class="imgprev" hidden alt="">'+
+    '<video class="vidprev" hidden muted playsinline loop controls></video>'+
     '<button type="button" class="remove">Remove</button>';
-  const prev = card.querySelector(".imgprev");
+  const imgPrev = card.querySelector(".imgprev");
+  const vidPrev = card.querySelector(".vidprev");
   const rmimg = card.querySelector(".rmimg");
   const hint = card.querySelector(".imghint");
   const status = card.querySelector(".imgstatus");
-  function showImage(name){
-    card.dataset.image = name || "";
-    if(name){
-      prev.src = "/uploads/"+encodeURIComponent(name)+"?t="+Date.now();
-      prev.hidden = false; rmimg.hidden = false; hint.hidden = false;
-      status.textContent = ""; card.classList.add("hasimg");
+  function showMedia(name, kind){
+    card.dataset.image = (kind === "image") ? (name || "") : "";
+    card.dataset.video = (kind === "video") ? (name || "") : "";
+    const src = name ? ("/uploads/"+encodeURIComponent(name)+"?t="+Date.now()) : "";
+    if(name && kind === "image"){
+      imgPrev.src = src; imgPrev.hidden = false; vidPrev.hidden = true; vidPrev.removeAttribute("src");
+    } else if(name && kind === "video"){
+      vidPrev.src = src; vidPrev.hidden = false; imgPrev.hidden = true; imgPrev.removeAttribute("src");
     } else {
-      prev.hidden = true; rmimg.hidden = true; hint.hidden = true;
-      card.classList.remove("hasimg");
+      imgPrev.hidden = true; vidPrev.hidden = true;
+      imgPrev.removeAttribute("src"); vidPrev.removeAttribute("src");
     }
+    const has = !!name;
+    rmimg.hidden = !has; hint.hidden = !has;
+    card.classList.toggle("hasmedia", has);
+    if(has) status.textContent = "";
   }
   card.querySelector(".imgfile").addEventListener("change", async (e)=>{
     const file = e.target.files[0]; if(!file) return;
     status.className = "imgstatus muted"; status.textContent = "Uploading.";
-    const fd = new FormData(); fd.append("image", file);
+    const fd = new FormData(); fd.append("media", file);
     try {
       const r = await fetch("/upload", { method:"POST", body: fd });
       const d = await r.json();
-      if(d.ok){ showImage(d.filename); }
+      if(d.ok){ showMedia(d.filename, d.kind); }
       else { status.className="imgstatus err"; status.textContent = "\\u2717 "+(d.message||"Upload failed"); }
     } catch(err){ status.className="imgstatus err"; status.textContent="\\u2717 Upload failed"; }
     e.target.value = "";
   });
-  rmimg.addEventListener("click", ()=>showImage(""));
+  rmimg.addEventListener("click", ()=>showMedia("", ""));
   card.querySelector(".remove").addEventListener("click", ()=>card.remove());
   document.getElementById("annlist").appendChild(card);
-  showImage(image || "");
+  if(video) showMedia(video, "video");
+  else if(image) showMedia(image, "image");
+  else showMedia("", "");
 }
 function renderAnnouncements(anns){
   document.getElementById("annlist").innerHTML = "";
-  (anns||[]).forEach(a => addAnnouncement(a.title, a.message || (a.lines ? a.lines.join("\\n") : ""), a.image));
+  (anns||[]).forEach(a => addAnnouncement(a.title, a.message || (a.lines ? a.lines.join("\\n") : ""), a.image, a.video));
 }
 
 function collect(){
@@ -1459,7 +1695,8 @@ function collect(){
     const title = card.querySelector(".anntitle").value.trim();
     const message = card.querySelector(".annmsg").value.trim();
     const image = card.dataset.image || "";
-    if(title || message || image) announcements.push({title, message, image});
+    const video = card.dataset.video || "";
+    if(title || message || image || video) announcements.push({title, message, image, video});
   });
   return { schedule, display: {
     schedule_header: document.getElementById("header").value,
@@ -1519,10 +1756,71 @@ load();
         return web.json_response(result, status=(200 if result['ok'] else 400))
 
     ALLOWED_IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
-    MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 15 MB
+    ALLOWED_VIDEO_EXTS = ('.mp4', '.mov', '.m4v', '.webm')
+    MAX_IMAGE_BYTES = 15 * 1024 * 1024   # 15 MB
+    MAX_VIDEO_BYTES = 300 * 1024 * 1024  # 300 MB
+
+    def _video_target_dim(self):
+        """Max dimension to downscale uploaded videos to: the display's larger
+        side (so frames are near-native and cheap to decode/scale), overridable
+        with AL_VIDEO_MAX_DIM."""
+        target = 1280
+        try:
+            surface = pygame.display.get_surface()
+            if surface:
+                target = max(surface.get_size())
+        except Exception:
+            pass
+        try:
+            target = int(os.environ.get('AL_VIDEO_MAX_DIM', target))
+        except (TypeError, ValueError):
+            pass
+        return max(160, target)
+
+    async def _transcode_video(self, src_path, dest_path):
+        """Downscale/normalize a video with ffmpeg for smooth playback: cap the
+        long side to the display size, bake in rotation, drop audio, re-encode to
+        H.264. Returns True on success (requires ffmpeg)."""
+        dim = self._video_target_dim()
+        vf = f"scale={dim}:{dim}:force_original_aspect_ratio=decrease:force_divisible_by=2"
+        cmd = ['ffmpeg', '-y', '-i', src_path, '-vf', vf, '-r', '30', '-an',
+               '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+               '-movflags', '+faststart', dest_path]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, stderr = await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                self.logger.info(f"Transcoded video to max dim {dim}: {os.path.basename(dest_path)}")
+                return True
+            self.logger.error(f"ffmpeg transcode failed (rc={proc.returncode}): "
+                              f"{stderr.decode(errors='ignore')[-400:]}")
+        except FileNotFoundError:
+            self.logger.warning("ffmpeg not found; storing original video without downscaling")
+        except Exception as e:
+            self.logger.error(f"Video transcode error: {e}")
+        return False
+
+    async def _stream_upload_to(self, field, path, max_bytes):
+        """Stream a multipart field to a file with a size cap. Returns the byte
+        count, or None if it exceeded the cap (partial file removed)."""
+        size = 0
+        with open(path, 'wb') as f:
+            while True:
+                chunk = await field.read_chunk()
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    f.close()
+                    os.remove(path)
+                    return None
+                f.write(chunk)
+        return size
 
     async def _handle_upload(self, request):
-        """Receive an announcement image (multipart) and save it to announcements/."""
+        """Receive an announcement image or video (multipart), save it to
+        announcements/. Videos are downscaled with ffmpeg for smooth playback."""
         from aiohttp import web
         try:
             reader = await request.multipart()
@@ -1530,40 +1828,49 @@ load();
             return web.json_response({'ok': False, 'message': 'Invalid upload'}, status=400)
 
         field = await reader.next()
-        while field is not None and field.name != 'image':
+        while field is not None and field.name != 'media':
             field = await reader.next()
         if field is None:
-            return web.json_response({'ok': False, 'message': 'No image provided'}, status=400)
+            return web.json_response({'ok': False, 'message': 'No file provided'}, status=400)
 
         ext = os.path.splitext(field.filename or '')[1].lower()
-        if ext not in self.ALLOWED_IMAGE_EXTS:
-            return web.json_response(
-                {'ok': False, 'message': f'Unsupported type (use {", ".join(self.ALLOWED_IMAGE_EXTS)})'},
-                status=400)
+        if ext in self.ALLOWED_IMAGE_EXTS:
+            kind, max_bytes = 'image', self.MAX_IMAGE_BYTES
+        elif ext in self.ALLOWED_VIDEO_EXTS:
+            kind, max_bytes = 'video', self.MAX_VIDEO_BYTES
+        else:
+            allowed = ', '.join(self.ALLOWED_IMAGE_EXTS + self.ALLOWED_VIDEO_EXTS)
+            return web.json_response({'ok': False, 'message': f'Unsupported type (use {allowed})'}, status=400)
 
-        base = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.splitext(os.path.basename(field.filename or ''))[0])[:40] or 'image'
-        filename = f"{base}-{uuid.uuid4().hex[:8]}{ext}"
-        dest = os.path.join(self._announcements_dir(), filename)
+        base = re.sub(r'[^A-Za-z0-9_-]', '_', os.path.splitext(os.path.basename(field.filename or ''))[0])[:40] or kind
+        directory = self._announcements_dir()
+        too_large = web.json_response(
+            {'ok': False, 'message': f'{kind.title()} too large (max {max_bytes // (1024 * 1024)} MB)'}, status=400)
 
-        size = 0
         try:
-            with open(dest, 'wb') as f:
-                while True:
-                    chunk = await field.read_chunk()
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > self.MAX_IMAGE_BYTES:
-                        f.close()
-                        os.remove(dest)
-                        return web.json_response({'ok': False, 'message': 'Image too large (max 15 MB)'}, status=400)
-                    f.write(chunk)
+            if kind == 'image':
+                filename = f"{base}-{uuid.uuid4().hex[:8]}{ext}"
+                if await self._stream_upload_to(field, os.path.join(directory, filename), max_bytes) is None:
+                    return too_large
+            else:
+                raw = os.path.join(directory, f"{base}-{uuid.uuid4().hex[:8]}.upload{ext}")
+                if await self._stream_upload_to(field, raw, max_bytes) is None:
+                    return too_large
+                final_name = f"{base}-{uuid.uuid4().hex[:8]}.mp4"
+                if await self._transcode_video(raw, os.path.join(directory, final_name)):
+                    try:
+                        os.remove(raw)
+                    except OSError:
+                        pass
+                    filename = final_name
+                else:
+                    filename = os.path.basename(raw)  # fall back to the original upload
         except Exception as e:
-            self.logger.error(f"Failed to save uploaded image: {e}")
-            return web.json_response({'ok': False, 'message': 'Failed to save image'}, status=500)
+            self.logger.error(f"Failed to save uploaded {kind}: {e}")
+            return web.json_response({'ok': False, 'message': f'Failed to save {kind}'}, status=500)
 
-        self.logger.info(f"Uploaded announcement image: {filename} ({size} bytes)")
-        return web.json_response({'ok': True, 'filename': filename})
+        self.logger.info(f"Uploaded announcement {kind}: {filename}")
+        return web.json_response({'ok': True, 'filename': filename, 'kind': kind})
 
     async def _handle_upload_get(self, request):
         """Serve an uploaded announcement image (for editor previews)."""
@@ -1638,9 +1945,12 @@ load();
             title = str(ann.get('title', '')).strip()
             message = str(ann.get('message', '')).strip()
             image = os.path.basename(str(ann.get('image', '')).strip()) if ann.get('image') else ''
-            if image or title or message:
+            video = os.path.basename(str(ann.get('video', '')).strip()) if ann.get('video') else ''
+            if image or video or title or message:
                 entry = {'title': title, 'message': message}
-                if image:
+                if video:
+                    entry['video'] = video
+                elif image:
                     entry['image'] = image
                 clean_anns.append(entry)
 

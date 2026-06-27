@@ -188,11 +188,12 @@ configured without editing YAML. On a device on the same Wi-Fi, open
 - **Weekly hours** — toggle each day open/closed and pick open/close times.
 - **Messages** — the schedule header and the closed (off-hours) message.
 - **Announcements** — add/edit/remove rotating announcements. Each can be text
-  (title + message), an **uploaded image**, or both — when an image has a
-  title/message, the text is shown above it. Images are zoomed to fit the display
-  (aspect ratio preserved) and honor EXIF orientation, so portrait phone photos
-  stay upright. Announcements rotate on a shared cadence; images are stored in the
-  gitignored `announcements/` folder.
+  (title + message), an **uploaded image or video**, or media with text shown
+  above it. Images and videos are zoomed to fit the display (aspect ratio
+  preserved) and honor orientation metadata, so portrait phone photos/videos stay
+  upright. Videos play silently and loop for the display window. Announcements
+  rotate on a shared cadence; uploads are stored in the gitignored
+  `announcements/` folder.
 - **Advanced timing** — rotation interval and on-screen duration.
 
 Tap **Save** and the changes are written to `config.yaml` and applied live — no
