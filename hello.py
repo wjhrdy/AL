@@ -1,4 +1,10 @@
 import asyncio
+import faulthandler
+import signal
+
+# Native crashes go to the service journal; SIGUSR1 dumps live thread stacks.
+faulthandler.enable(all_threads=True)
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 import pygame
 import pygame.freetype
 from io import BytesIO
@@ -201,6 +207,10 @@ class MusicIdentifier:
         self.last_sonos_check = 0
         self.sonos_check_interval = 1.0
         self.sonos_check_interval_paused = 5.0
+        self.sonos_retry_interval = 30.0
+        self.last_sonos_discovery = None
+        self.sonos_failures = 0
+        self.sonos_player_name = None
 
         # Set up logging
         log_level = logging.DEBUG if debug_mode else logging.INFO
@@ -1325,7 +1335,7 @@ class MusicIdentifier:
                 await asyncio.sleep(1 / 30 if playing_video else 0.1)
 
         except Exception as e:
-            self.logger.error(f"Fatal error in run loop: {e}")
+            self.logger.exception("Fatal error in run loop")
             if self.debug_mode:
                 import traceback
                 self.logger.debug(traceback.format_exc())
@@ -2256,8 +2266,9 @@ load();
 
     def init_sonos(self):
         """Initialize connection to first available Sonos speaker."""
+        self.last_sonos_discovery = time.monotonic()
         try:
-            speakers = discover()
+            speakers = discover(timeout=5)
             if speakers is None:
                 self.logger.info("No Sonos speakers found on network")
                 self.sonos_speaker = None
@@ -2265,19 +2276,36 @@ load();
 
             speakers_list = list(speakers)
             if speakers_list:
+                if self.sonos_player_name:
+                    speakers_list = [speaker for speaker in speakers_list
+                                     if speaker.player_name == self.sonos_player_name]
+                    if not speakers_list:
+                        self.sonos_speaker = None
+                        self.logger.warning("Waiting for Sonos speaker: %s", self.sonos_player_name)
+                        return
                 self.sonos_speaker = speakers_list[0]
-                self.logger.info(f"Connected to Sonos speaker: {self.sonos_speaker.player_name}")
+                self.sonos_player_name = self.sonos_speaker.player_name
+                self.sonos_failures = 0
+                self.last_sonos_check = 0
+                self.last_identified = None
+                self.logger.info(f"Connected to Sonos speaker: {self.sonos_player_name}")
             else:
                 self.logger.info("No Sonos speakers found on network")
                 self.sonos_speaker = None
         except Exception as e:
-            self.logger.error(f"Error discovering Sonos speakers: {e}")
+            self.logger.exception("Error discovering Sonos speakers")
             self.sonos_speaker = None
 
     async def get_sonos_track_info(self):
         """Get current track info from Sonos speaker."""
         if not self.sonos_speaker:
-            return None
+            now = time.monotonic()
+            if (self.last_sonos_discovery is None or
+                    now - self.last_sonos_discovery >= self.sonos_retry_interval):
+                self.logger.info("Retrying Sonos discovery")
+                await asyncio.to_thread(self.init_sonos)
+            if not self.sonos_speaker:
+                return None
 
         current_time = time.time()
         if current_time - self.last_sonos_check < (
@@ -2291,7 +2319,8 @@ load();
         self.last_sonos_check = current_time
 
         try:
-            transport_info = self.sonos_speaker.get_current_transport_info()
+            transport_info = await asyncio.to_thread(
+                self.sonos_speaker.get_current_transport_info)
             current_state = transport_info.get('current_transport_state', '').lower()
 
             was_playing = self.sonos_is_playing
@@ -2304,7 +2333,9 @@ load();
                     return None
 
             if self.sonos_is_playing:
-                track_info = self.sonos_speaker.get_current_track_info()
+                track_info = await asyncio.to_thread(
+                    self.sonos_speaker.get_current_track_info)
+                self.sonos_failures = 0
                 if track_info and track_info.get('title'):
                     return {
                         'title': track_info.get('title', 'Unknown Title'),
@@ -2314,10 +2345,18 @@ load();
                             'coverarthq': track_info.get('album_art')
                         }
                     }
+            self.sonos_failures = 0
             return None
-        except Exception as e:
-            self.logger.error(f"Error getting Sonos track info: {e}")
+        except Exception:
+            self.sonos_failures += 1
+            self.logger.exception("Error getting Sonos track info (%s consecutive failures)",
+                                  self.sonos_failures)
             self.sonos_is_playing = False
+            if self.sonos_failures >= 3:
+                self.logger.warning("Sonos connection lost; will rediscover the speaker")
+                self.sonos_speaker = None
+                self.last_sonos_discovery = None
+                self.last_identified = None
             return None
 
     def load_display_config(self):
